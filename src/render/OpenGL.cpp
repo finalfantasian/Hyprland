@@ -19,7 +19,8 @@
 #include "../protocols/LayerShell.hpp"
 #include "../protocols/core/Compositor.hpp"
 #include "../protocols/ColorManagement.hpp"
-#include "../protocols/types/ColorManagement.hpp"
+#include "../helpers/cm/ColorManagement.hpp"
+#include "../managers/HookSystemManager.hpp"
 #include "../managers/input/InputManager.hpp"
 #include "../managers/eventLoop/EventLoopManager.hpp"
 #include "../managers/CursorManager.hpp"
@@ -777,6 +778,12 @@ void CHyprOpenGLImpl::end() {
 
     TRACY_GPU_ZONE("RenderEnd");
 
+    m_renderData.currentWindow.reset();
+    m_renderData.surface.reset();
+    m_renderData.currentLS.reset();
+    m_renderData.clipBox = {};
+    m_renderData.clipRegion.clear();
+
     // end the render, copy the data to the main framebuffer
     if LIKELY (m_offloadedFramebuffer) {
         m_renderData.damage = m_renderData.finalDamage;
@@ -802,8 +809,8 @@ void CHyprOpenGLImpl::end() {
 
         if LIKELY (m_finalScreenShader->program() < 1 && !g_pHyprRenderer->m_crashingInProgress)
             renderTexturePrimitive(m_renderData.pCurrentMonData->offloadFB.getTexture(), monbox);
-        else
-            renderTexture(m_renderData.pCurrentMonData->offloadFB.getTexture(), monbox, {});
+        else // we need to use renderTexture if we do any CM whatsoever.
+            renderTexture(m_renderData.pCurrentMonData->offloadFB.getTexture(), monbox, {.finalMonitorCM = true});
 
         blend(true);
 
@@ -890,6 +897,33 @@ static std::string   processShader(const std::string& filename, const std::map<s
         processShaderIncludes(source, includes);
     }
     return source;
+}
+
+// shader has #include "CM.glsl"
+static void getCMShaderUniforms(SShader& shader) {
+    shader.uniformLocations[SHADER_SOURCE_TF]         = glGetUniformLocation(shader.program, "sourceTF");
+    shader.uniformLocations[SHADER_TARGET_TF]         = glGetUniformLocation(shader.program, "targetTF");
+    shader.uniformLocations[SHADER_SRC_TF_RANGE]      = glGetUniformLocation(shader.program, "srcTFRange");
+    shader.uniformLocations[SHADER_DST_TF_RANGE]      = glGetUniformLocation(shader.program, "dstTFRange");
+    shader.uniformLocations[SHADER_TARGET_PRIMARIES]  = glGetUniformLocation(shader.program, "targetPrimaries");
+    shader.uniformLocations[SHADER_MAX_LUMINANCE]     = glGetUniformLocation(shader.program, "maxLuminance");
+    shader.uniformLocations[SHADER_SRC_REF_LUMINANCE] = glGetUniformLocation(shader.program, "srcRefLuminance");
+    shader.uniformLocations[SHADER_DST_MAX_LUMINANCE] = glGetUniformLocation(shader.program, "dstMaxLuminance");
+    shader.uniformLocations[SHADER_DST_REF_LUMINANCE] = glGetUniformLocation(shader.program, "dstRefLuminance");
+    shader.uniformLocations[SHADER_SDR_SATURATION]    = glGetUniformLocation(shader.program, "sdrSaturation");
+    shader.uniformLocations[SHADER_SDR_BRIGHTNESS]    = glGetUniformLocation(shader.program, "sdrBrightnessMultiplier");
+    shader.uniformLocations[SHADER_CONVERT_MATRIX]    = glGetUniformLocation(shader.program, "convertMatrix");
+    shader.uniformLocations[SHADER_USE_ICC]           = glGetUniformLocation(shader.program, "useIcc");
+    shader.uniformLocations[SHADER_LUT_3D]            = glGetUniformLocation(shader.program, "iccLut3D");
+    shader.uniformLocations[SHADER_LUT_SIZE]          = glGetUniformLocation(shader.program, "iccLutSize");
+}
+
+// shader has #include "rounding.glsl"
+static void getRoundingShaderUniforms(SShader& shader) {
+    shader.uniformLocations[SHADER_TOP_LEFT]       = glGetUniformLocation(shader.program, "topLeft");
+    shader.uniformLocations[SHADER_FULL_SIZE]      = glGetUniformLocation(shader.program, "fullSize");
+    shader.uniformLocations[SHADER_RADIUS]         = glGetUniformLocation(shader.program, "radius");
+    shader.uniformLocations[SHADER_ROUNDING_POWER] = glGetUniformLocation(shader.program, "roundingPower");
 }
 
 bool CHyprOpenGLImpl::initShaders() {
@@ -1054,12 +1088,12 @@ void CHyprOpenGLImpl::clear(const CHyprColor& color) {
 
     TRACY_GPU_ZONE("RenderClear");
 
-    glClearColor(color.r, color.g, color.b, color.a);
+    GLCALL(glClearColor(color.r, color.g, color.b, color.a));
 
     if (!m_renderData.damage.empty()) {
         m_renderData.damage.forEachRect([this](const auto& RECT) {
             scissor(&RECT, m_renderData.transformDamage);
-            glClear(GL_COLOR_BUFFER_BIT);
+            GLCALL(glClear(GL_COLOR_BUFFER_BIT));
         });
     }
 }
@@ -1067,7 +1101,7 @@ void CHyprOpenGLImpl::clear(const CHyprColor& color) {
 void CHyprOpenGLImpl::blend(bool enabled) {
     if (enabled) {
         setCapStatus(GL_BLEND, true);
-        glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA); // everything is premultiplied
+        GLCALL(glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA)); // everything is premultiplied
     } else
         setCapStatus(GL_BLEND, false);
 
@@ -1086,7 +1120,7 @@ void CHyprOpenGLImpl::scissor(const CBox& originalBox, bool transform) {
         box.transform(TR, m_renderData.pMonitor->m_transformedSize.x, m_renderData.pMonitor->m_transformedSize.y);
 
         if (box != m_lastScissorBox) {
-            glScissor(box.x, box.y, box.width, box.height);
+            GLCALL(glScissor(box.x, box.y, box.width, box.height));
             m_lastScissorBox = box;
         }
 
@@ -1095,7 +1129,7 @@ void CHyprOpenGLImpl::scissor(const CBox& originalBox, bool transform) {
     }
 
     if (originalBox != m_lastScissorBox) {
-        glScissor(originalBox.x, originalBox.y, originalBox.width, originalBox.height);
+        GLCALL(glScissor(originalBox.x, originalBox.y, originalBox.width, originalBox.height));
         m_lastScissorBox = originalBox;
     }
 
@@ -1288,22 +1322,42 @@ void CHyprOpenGLImpl::passCMUniforms(WP<CShader> shader, const NColorManagement:
     const float maxLuminance = needsHDRmod ?
         imageDescription->value().getTFMaxLuminance(-1) :
         (imageDescription->value().luminances.max > 0 ? imageDescription->value().luminances.max : imageDescription->value().luminances.reference);
-    shader->setUniformFloat(SHADER_MAX_LUMINANCE, maxLuminance * targetImageDescription->value().luminances.reference / imageDescription->value().luminances.reference);
-    shader->setUniformFloat(SHADER_DST_MAX_LUMINANCE, targetImageDescription->value().luminances.max > 0 ? targetImageDescription->value().luminances.max : 10000);
-    shader->setUniformFloat(SHADER_SDR_SATURATION, needsSDRmod && m_renderData.pMonitor->m_sdrSaturation > 0 ? m_renderData.pMonitor->m_sdrSaturation : 1.0f);
-    shader->setUniformFloat(SHADER_SDR_BRIGHTNESS, needsSDRmod && m_renderData.pMonitor->m_sdrBrightness > 0 ? m_renderData.pMonitor->m_sdrBrightness : 1.0f);
-    const auto cacheKey = std::make_pair(imageDescription->id(), targetImageDescription->id());
-    if (!primariesConversionCache.contains(cacheKey)) {
-        auto                         conversion      = imageDescription->getPrimaries()->convertMatrix(targetImageDescription->getPrimaries());
-        const auto                   mat             = conversion.mat();
-        const std::array<GLfloat, 9> glConvertMatrix = {
-            mat[0][0], mat[1][0], mat[2][0], //
-            mat[0][1], mat[1][1], mat[2][1], //
-            mat[0][2], mat[1][2], mat[2][2], //
-        };
-        primariesConversionCache.insert(std::make_pair(cacheKey, glConvertMatrix));
+    shader.setUniformFloat(SHADER_MAX_LUMINANCE,
+                           maxLuminance * targetImageDescription->value().luminances.reference /
+                               (needsHDRmod ? imageDescription->value().getTFRefLuminance(-1) : imageDescription->value().luminances.reference));
+    shader.setUniformFloat(SHADER_DST_MAX_LUMINANCE, targetImageDescription->value().luminances.max > 0 ? targetImageDescription->value().luminances.max : 10000);
+    shader.setUniformFloat(SHADER_SDR_SATURATION, needsSDRmod && m_renderData.pMonitor->m_sdrSaturation > 0 ? m_renderData.pMonitor->m_sdrSaturation : 1.0f);
+    shader.setUniformFloat(SHADER_SDR_BRIGHTNESS, needsSDRmod && m_renderData.pMonitor->m_sdrBrightness > 0 ? m_renderData.pMonitor->m_sdrBrightness : 1.0f);
+
+    if (!targetImageDescription->value().icc.present) {
+        const auto cacheKey = std::make_pair(imageDescription->id(), targetImageDescription->id());
+        if (!primariesConversionCache.contains(cacheKey)) {
+            auto                         conversion      = imageDescription->getPrimaries()->convertMatrix(targetImageDescription->getPrimaries());
+            const auto                   mat             = conversion.mat();
+            const std::array<GLfloat, 9> glConvertMatrix = {
+                mat[0][0], mat[1][0], mat[2][0], //
+                mat[0][1], mat[1][1], mat[2][1], //
+                mat[0][2], mat[1][2], mat[2][2], //
+            };
+            primariesConversionCache.insert(std::make_pair(cacheKey, glConvertMatrix));
+        }
+        shader.setUniformMatrix3fv(SHADER_CONVERT_MATRIX, 1, false, primariesConversionCache.at(cacheKey));
+
+        shader.setUniformInt(SHADER_USE_ICC, 0);
+        shader.setUniformInt(SHADER_LUT_3D, 8); // req'd for ogl
+    } else {
+        // ICC path, use a 3D LUT
+        shader.setUniformInt(SHADER_USE_ICC, 1);
+
+        // TODO: this sucks
+        GLCALL(glActiveTexture(GL_TEXTURE8));
+        targetImageDescription->value().icc.lutTexture->bind();
+
+        shader.setUniformInt(SHADER_LUT_3D, 8);
+        shader.setUniformFloat(SHADER_LUT_SIZE, targetImageDescription->value().icc.lutSize);
+
+        GLCALL(glActiveTexture(GL_TEXTURE0));
     }
-    shader->setUniformMatrix3fv(SHADER_CONVERT_MATRIX, 1, false, primariesConversionCache[cacheKey]);
 }
 
 void CHyprOpenGLImpl::passCMUniforms(WP<CShader> shader, const PImageDescription imageDescription) {
@@ -1384,6 +1438,8 @@ void CHyprOpenGLImpl::renderTextureInternal(SP<CTexture> tex, const CBox& box, c
         tex->setTexParameter(GL_TEXTURE_MAG_FILTER, tex->magFilter);
         tex->setTexParameter(GL_TEXTURE_MIN_FILTER, tex->minFilter);
     }
+    if (data.finalMonitorCM)
+        texType = TEXTURE_RGBX;
 
     const bool isHDRSurface      = m_renderData.surface.valid() && m_renderData.surface->m_colorManagement.valid() ? m_renderData.surface->m_colorManagement->isHDR() : false;
     const bool canPassHDRSurface = isHDRSurface && !m_renderData.surface->m_colorManagement->isWindowsScRGB(); // windows scRGB requires CM shader
@@ -1406,46 +1462,51 @@ void CHyprOpenGLImpl::renderTextureInternal(SP<CTexture> tex, const CBox& box, c
 
     if (data.discardActive)
         shaderFeatures |= SH_FEAT_DISCARD;
+    if (!skipCM && (texType == TEXTURE_RGBA || texType == TEXTURE_RGBX))
+        shader = &m_shaders->m_shCM;
 
     if (!usingFinalShader) {
         if (data.allowDim && m_renderData.currentWindow && (m_renderData.currentWindow->m_notRespondingTint->value() > 0 || m_renderData.currentWindow->m_dimPercent->value() > 0))
             shaderFeatures |= SH_FEAT_TINT;
 
-        if (data.round > 0)
-            shaderFeatures |= SH_FEAT_ROUNDING;
-
-        if (!skipCM) {
-            shaderFeatures |= SH_FEAT_CM;
-
-            const bool  needsSDRmod     = isSDR2HDR(imageDescription->value(), targetImageDescription->value());
-            const bool  needsHDRmod     = !needsSDRmod && isHDR2SDR(imageDescription->value(), targetImageDescription->value());
-            const float maxLuminance    = needsHDRmod ?
-                   imageDescription->value().getTFMaxLuminance(-1) :
-                   (imageDescription->value().luminances.max > 0 ? imageDescription->value().luminances.max : imageDescription->value().luminances.reference);
-            const auto  dstMaxLuminance = targetImageDescription->value().luminances.max > 0 ? targetImageDescription->value().luminances.max : 10000;
-
-            if (maxLuminance >= dstMaxLuminance * 1.01)
-                shaderFeatures |= SH_FEAT_TONEMAP;
-
-            if (!data.cmBackToSRGB &&
-                (imageDescription->value().transferFunction == CM_TRANSFER_FUNCTION_SRGB || imageDescription->value().transferFunction == CM_TRANSFER_FUNCTION_GAMMA22) &&
-                targetImageDescription->value().transferFunction == CM_TRANSFER_FUNCTION_ST2084_PQ &&
-                ((m_renderData.pMonitor->m_sdrSaturation > 0 && m_renderData.pMonitor->m_sdrSaturation != 1.0f) ||
-                 (m_renderData.pMonitor->m_sdrBrightness > 0 && m_renderData.pMonitor->m_sdrBrightness != 1.0f)))
-                shaderFeatures |= SH_FEAT_SDR_MOD;
-        }
+    if (shader == &m_shaders->m_shCM) {
+        shader->setUniformInt(SHADER_TEX_TYPE, texType);
+        if (data.cmBackToSRGB) {
+            static auto PSDREOTF      = CConfigValue<Hyprlang::INT>("render:cm_sdr_eotf");
+            auto        chosenSdrEotf = *PSDREOTF != 3 ? NColorManagement::CM_TRANSFER_FUNCTION_GAMMA22 : NColorManagement::CM_TRANSFER_FUNCTION_SRGB;
+            passCMUniforms(*shader, imageDescription, CImageDescription::from(NColorManagement::SImageDescription{.transferFunction = chosenSdrEotf}), true, -1, -1);
+        } else if (data.finalMonitorCM)
+            passCMUniforms(*shader, CImageDescription::from(NColorManagement::SImageDescription{.transferFunction = NColorManagement::CM_TRANSFER_FUNCTION_SRGB}));
+        else
+            passCMUniforms(*shader, imageDescription,
+                           CImageDescription::from(NColorManagement::SImageDescription{
+                               .transferFunction = CM_TRANSFER_FUNCTION_GAMMA22})); // CM into SRGB with Gamma 2.2 (akin to KDE, cuz we love KDE)
     }
 
-    if (!shader)
-        shader = getSurfaceShader(shaderFeatures);
+    GLCALL(glActiveTexture(GL_TEXTURE0));
+    tex->bind();
 
-    shader = useShader(shader);
+    tex->setTexParameter(GL_TEXTURE_WRAP_S, data.wrapX);
+    tex->setTexParameter(GL_TEXTURE_WRAP_T, data.wrapY);
 
-    if (!skipCM && !usingFinalShader) {
-        if (data.cmBackToSRGB)
-            passCMUniforms(shader, imageDescription, targetImageDescription, true, -1, -1);
-        else
-            passCMUniforms(shader, imageDescription);
+    if (data.finalMonitorCM) {
+        // reset all properties which might fuck up the final CM pass
+        shader->setUniformFloat(SHADER_ALPHA, 1.F);
+        shader->setUniformInt(SHADER_DISCARD_OPAQUE, 0);
+        shader->setUniformInt(SHADER_DISCARD_ALPHA, 0);
+        shader->setUniformFloat2(SHADER_TOP_LEFT, 0, 0);
+        shader->setUniformFloat2(SHADER_FULL_SIZE, 0, 0);
+        shader->setUniformFloat(SHADER_RADIUS, 0);
+        shader->setUniformFloat(SHADER_ROUNDING_POWER, 0);
+        shader->setUniformInt(SHADER_APPLY_TINT, 0);
+    }
+
+    if (m_renderData.useNearestNeighbor) {
+        tex->setTexParameter(GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        tex->setTexParameter(GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    } else {
+        tex->setTexParameter(GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        tex->setTexParameter(GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     }
 
     shader->setUniformMatrix3fv(SHADER_PROJ, 1, GL_TRUE, glMatrix.getMatrix());
@@ -1554,30 +1615,19 @@ void CHyprOpenGLImpl::renderTextureInternal(SP<CTexture> tex, const CBox& box, c
             shader->setUniformInt(SHADER_APPLY_TINT, 0);
     }
 
-    glBindVertexArray(shader->getUniformLocation(SHADER_SHADER_VAO));
-    glBindBuffer(GL_ARRAY_BUFFER, shader->getUniformLocation(SHADER_SHADER_VBO));
-
-    // this tells GPU can keep reading the old block for previous draws while the CPU writes to a new one.
-    // to avoid stalls if renderTextureInternal is called multiple times on same renderpass
-    // at the cost of some temporar vram usage.
-    glBufferData(GL_ARRAY_BUFFER, sizeof(fullVerts), nullptr, GL_DYNAMIC_DRAW);
-
-    auto verts = fullVerts;
-
+    GLCALL(glBindVertexArray(shader->uniformLocations[SHADER_SHADER_VAO]));
     if (data.allowCustomUV && m_renderData.primarySurfaceUVTopLeft != Vector2D(-1, -1)) {
-        const float u0 = m_renderData.primarySurfaceUVTopLeft.x;
-        const float v0 = m_renderData.primarySurfaceUVTopLeft.y;
-        const float u1 = m_renderData.primarySurfaceUVBottomRight.x;
-        const float v1 = m_renderData.primarySurfaceUVBottomRight.y;
+        const float customUVs[] = {
+            m_renderData.primarySurfaceUVBottomRight.x, m_renderData.primarySurfaceUVTopLeft.y,     m_renderData.primarySurfaceUVTopLeft.x,
+            m_renderData.primarySurfaceUVTopLeft.y,     m_renderData.primarySurfaceUVBottomRight.x, m_renderData.primarySurfaceUVBottomRight.y,
+            m_renderData.primarySurfaceUVTopLeft.x,     m_renderData.primarySurfaceUVBottomRight.y,
+        };
 
-        verts[0].u = u0;
-        verts[0].v = v0;
-        verts[1].u = u0;
-        verts[1].v = v1;
-        verts[2].u = u1;
-        verts[2].v = v0;
-        verts[3].u = u1;
-        verts[3].v = v1;
+        GLCALL(glBindBuffer(GL_ARRAY_BUFFER, shader->uniformLocations[SHADER_SHADER_VBO_UV]));
+        GLCALL(glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(customUVs), customUVs));
+    } else {
+        GLCALL(glBindBuffer(GL_ARRAY_BUFFER, shader->uniformLocations[SHADER_SHADER_VBO_UV]));
+        GLCALL(glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(fullVerts), fullVerts));
     }
 
     glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(verts), verts.data());
@@ -1595,18 +1645,18 @@ void CHyprOpenGLImpl::renderTextureInternal(SP<CTexture> tex, const CBox& box, c
         if (!damageClip.empty()) {
             damageClip.forEachRect([this](const auto& RECT) {
                 scissor(&RECT, m_renderData.transformDamage);
-                glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+                GLCALL(glDrawArrays(GL_TRIANGLE_STRIP, 0, 4));
             });
         }
     } else {
         data.damage->forEachRect([this](const auto& RECT) {
             scissor(&RECT, m_renderData.transformDamage);
-            glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+            GLCALL(glDrawArrays(GL_TRIANGLE_STRIP, 0, 4));
         });
     }
 
-    glBindVertexArray(0);
-    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    GLCALL(glBindVertexArray(0));
+    GLCALL(glBindBuffer(GL_ARRAY_BUFFER, 0));
     tex->unbind();
 }
 
@@ -1759,28 +1809,10 @@ CFramebuffer* CHyprOpenGLImpl::blurFramebufferWithDamage(float a, CRegion* origi
 
         WP<CShader> shader;
 
-        // From FB to sRGB
-        const bool skipCM = !m_cmSupported || m_renderData.pMonitor->m_imageDescription->id() == DEFAULT_IMAGE_DESCRIPTION->id();
-        if (!skipCM) {
-            shader = useShader(m_shaders->frag[SH_FRAG_CM_BLURPREPARE]);
-            passCMUniforms(shader, m_renderData.pMonitor->m_imageDescription, DEFAULT_IMAGE_DESCRIPTION);
-            shader->setUniformFloat(SHADER_SDR_SATURATION,
-                                    m_renderData.pMonitor->m_sdrSaturation > 0 &&
-                                            m_renderData.pMonitor->m_imageDescription->value().transferFunction == NColorManagement::CM_TRANSFER_FUNCTION_ST2084_PQ ?
-                                        m_renderData.pMonitor->m_sdrSaturation :
-                                        1.0f);
-            shader->setUniformFloat(SHADER_SDR_BRIGHTNESS,
-                                    m_renderData.pMonitor->m_sdrBrightness > 0 &&
-                                            m_renderData.pMonitor->m_imageDescription->value().transferFunction == NColorManagement::CM_TRANSFER_FUNCTION_ST2084_PQ ?
-                                        m_renderData.pMonitor->m_sdrBrightness :
-                                        1.0f);
-        } else
-            shader = useShader(m_shaders->frag[SH_FRAG_BLURPREPARE]);
-
-        shader->setUniformMatrix3fv(SHADER_PROJ, 1, GL_TRUE, glMatrix.getMatrix());
-        shader->setUniformFloat(SHADER_CONTRAST, *PBLURCONTRAST);
-        shader->setUniformFloat(SHADER_BRIGHTNESS, *PBLURBRIGHTNESS);
-        shader->setUniformInt(SHADER_TEX, 0);
+        m_shaders->m_shBLURPREPARE.setUniformMatrix3fv(SHADER_PROJ, 1, GL_TRUE, glMatrix.getMatrix());
+        m_shaders->m_shBLURPREPARE.setUniformFloat(SHADER_CONTRAST, *PBLURCONTRAST);
+        m_shaders->m_shBLURPREPARE.setUniformFloat(SHADER_BRIGHTNESS, *PBLURBRIGHTNESS);
+        m_shaders->m_shBLURPREPARE.setUniformInt(SHADER_TEX, 0);
 
         glBindVertexArray(shader->getUniformLocation(SHADER_SHADER_VAO));
 
@@ -2240,19 +2272,12 @@ void CHyprOpenGLImpl::renderBorder(const CBox& box, const CGradientValueData& gr
 
     WP<CShader> shader;
 
-    const bool  skipCM = !m_cmSupported || m_renderData.pMonitor->m_imageDescription->id() == DEFAULT_IMAGE_DESCRIPTION->id();
-    if (!skipCM) {
-        shader = useShader(m_shaders->frag[SH_FRAG_CM_BORDER1]);
-        passCMUniforms(shader, DEFAULT_IMAGE_DESCRIPTION);
-    } else
-        shader = useShader(m_shaders->frag[SH_FRAG_BORDER1]);
-
-    shader->setUniformMatrix3fv(SHADER_PROJ, 1, GL_TRUE, glMatrix.getMatrix());
-    shader->setUniform4fv(SHADER_GRADIENT, grad.m_colorsOkLabA.size() / 4, grad.m_colorsOkLabA);
-    shader->setUniformInt(SHADER_GRADIENT_LENGTH, grad.m_colorsOkLabA.size() / 4);
-    shader->setUniformFloat(SHADER_ANGLE, sc<int>(grad.m_angle / (std::numbers::pi / 180.0)) % 360 * (std::numbers::pi / 180.0));
-    shader->setUniformFloat(SHADER_ALPHA, data.a);
-    shader->setUniformInt(SHADER_GRADIENT2_LENGTH, 0);
+    m_shaders->m_shBORDER1.setUniformMatrix3fv(SHADER_PROJ, 1, GL_TRUE, glMatrix.getMatrix());
+    m_shaders->m_shBORDER1.setUniform4fv(SHADER_GRADIENT, grad.m_colorsOkLabA.size() / 4, grad.m_colorsOkLabA);
+    m_shaders->m_shBORDER1.setUniformInt(SHADER_GRADIENT_LENGTH, grad.m_colorsOkLabA.size() / 4);
+    m_shaders->m_shBORDER1.setUniformFloat(SHADER_ANGLE, sc<int>(grad.m_angle / (std::numbers::pi / 180.0)) % 360 * (std::numbers::pi / 180.0));
+    m_shaders->m_shBORDER1.setUniformFloat(SHADER_ALPHA, data.a);
+    m_shaders->m_shBORDER1.setUniformInt(SHADER_GRADIENT2_LENGTH, 0);
 
     CBox transformedBox = newBox;
     transformedBox.transform(Math::wlTransformToHyprutils(Math::invertTransform(m_renderData.pMonitor->m_transform)), m_renderData.pMonitor->m_transformedSize.x,
@@ -2332,10 +2357,10 @@ void CHyprOpenGLImpl::renderBorder(const CBox& box, const CGradientValueData& gr
     } else
         shader = useShader(m_shaders->frag[SH_FRAG_BORDER1]);
 
-    shader->setUniformMatrix3fv(SHADER_PROJ, 1, GL_TRUE, glMatrix.getMatrix());
-    shader->setUniform4fv(SHADER_GRADIENT, grad1.m_colorsOkLabA.size() / 4, grad1.m_colorsOkLabA);
-    shader->setUniformInt(SHADER_GRADIENT_LENGTH, grad1.m_colorsOkLabA.size() / 4);
-    shader->setUniformFloat(SHADER_ANGLE, sc<int>(grad1.m_angle / (std::numbers::pi / 180.0)) % 360 * (std::numbers::pi / 180.0));
+    m_shaders->m_shBORDER1.setUniformMatrix3fv(SHADER_PROJ, 1, GL_TRUE, glMatrix.getMatrix());
+    m_shaders->m_shBORDER1.setUniform4fv(SHADER_GRADIENT, grad1.m_colorsOkLabA.size() / 4, grad1.m_colorsOkLabA);
+    m_shaders->m_shBORDER1.setUniformInt(SHADER_GRADIENT_LENGTH, grad1.m_colorsOkLabA.size() / 4);
+    m_shaders->m_shBORDER1.setUniformFloat(SHADER_ANGLE, sc<int>(grad1.m_angle / (std::numbers::pi / 180.0)) % 360 * (std::numbers::pi / 180.0));
     if (!grad2.m_colorsOkLabA.empty())
         shader->setUniform4fv(SHADER_GRADIENT2, grad2.m_colorsOkLabA.size() / 4, grad2.m_colorsOkLabA);
     shader->setUniformInt(SHADER_GRADIENT2_LENGTH, grad2.m_colorsOkLabA.size() / 4);
@@ -2408,6 +2433,7 @@ void CHyprOpenGLImpl::renderRoundedShadow(const CBox& box, int round, float roun
     shader->setUniformInt(SHADER_SKIP_CM, skipCM);
     if (!skipCM)
         passCMUniforms(shader, DEFAULT_IMAGE_DESCRIPTION);
+    useProgram(m_shaders->m_shSHADOW.program);
 
     shader->setUniformMatrix3fv(SHADER_PROJ, 1, GL_TRUE, glMatrix.getMatrix());
     shader->setUniformFloat4(SHADER_COLOR, col.r, col.g, col.b, col.a * a);
@@ -3050,9 +3076,9 @@ void CHyprOpenGLImpl::setCapStatus(int cap, bool status) {
 
     if (idx == CAP_STATUS_END) {
         if (status)
-            glEnable(cap);
+            GLCALL(glEnable(cap))
         else
-            glDisable(cap);
+            GLCALL(glDisable(cap));
 
         return;
     }
@@ -3062,10 +3088,10 @@ void CHyprOpenGLImpl::setCapStatus(int cap, bool status) {
 
     if (status) {
         m_capStatus[idx] = status;
-        glEnable(cap);
+        GLCALL(glEnable(cap));
     } else {
         m_capStatus[idx] = status;
-        glDisable(cap);
+        GLCALL(glDisable(cap));
     }
 }
 

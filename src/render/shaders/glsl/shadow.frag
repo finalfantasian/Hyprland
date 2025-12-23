@@ -5,7 +5,6 @@ precision highp float;
 in vec4 v_color;
 in vec2 v_texcoord;
 
-uniform int skipCM;
 uniform int sourceTF; // eTransferFunction
 uniform int targetTF; // eTransferFunction
 uniform mat3 targetPrimariesXYZ;
@@ -17,8 +16,6 @@ uniform float radius;
 uniform float roundingPower;
 uniform float range;
 uniform float shadowPower;
-
-#include "CM.glsl"
 
 float pixAlphaRoundedDistance(float distanceToCorner) {
      if (distanceToCorner > radius) {

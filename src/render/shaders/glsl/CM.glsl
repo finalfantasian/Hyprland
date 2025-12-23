@@ -5,6 +5,9 @@ uniform float srcRefLuminance;
 uniform mat3 convertMatrix;
 
 #include "sdr_mod.glsl"
+uniform int useIcc;
+uniform highp sampler3D iccLut3D;
+uniform float iccLutSize;
 
 //enum eTransferFunction
 #define CM_TRANSFER_FUNCTION_BT1886     1
@@ -64,6 +67,31 @@ uniform mat3 convertMatrix;
 #define HLG_MAX_LUMINANCE 1000.0
 
 #define M_E 2.718281828459045
+
+vec3 applyIcc3DLut(vec3 linearRgb01) {
+    vec3 x = clamp(linearRgb01, 0.0, 1.0);
+
+    // Map [0..1] to texel centers to avoid edge issues
+    float N = iccLutSize;
+    vec3 coord = (x * (N - 1.0) + 0.5) / N;
+
+    return texture(iccLut3D, coord).rgb;
+}
+
+vec3 xy2xyz(vec2 xy) {
+    if (xy.y == 0.0)
+        return vec3(0.0, 0.0, 0.0);
+
+    return vec3(xy.x / xy.y, 1.0, (1.0 - xy.x - xy.y) / xy.y);
+}
+
+vec4 saturate(vec4 color, mat3 primaries, float saturation) {
+    if (saturation == 1.0)
+        return color;
+    vec3 brightness = vec3(primaries[1][0], primaries[1][1], primaries[1][2]);
+    float Y = dot(color.rgb, brightness);
+    return vec4(mix(vec3(Y), color.rgb, saturation), color[3]);
+}
 
 // The primary source for these transfer functions is https://www.itu.int/dms_pubrec/itu-r/rec/bt/R-REC-BT.1361-0-199802-W!!PDF-E.pdf
 vec3 tfInvPQ(vec3 color) {
@@ -250,7 +278,7 @@ vec4 fromLinear(vec4 color, int tf) {
     return color;
 }
 
-vec4 fromLinearNit(vec4 color, int tf, vec2 range) {
+vec4 fromLinearNit(vec4 color, int tf, vec2 range) {    
     if (tf == CM_TRANSFER_FUNCTION_EXT_LINEAR)
         color.rgb = color.rgb / SDR_MAX_LUMINANCE;
     else {
@@ -274,5 +302,21 @@ vec4 doColorManagement(vec4 pixColor, int srcTF, int dstTF, mat3 dstxyz) {
     pixColor = fromLinearNit(pixColor, dstTF, dstTFRange);
     #include "do_sdr_mod.glsl"
 
+
+    if (useIcc == 1) {
+        pixColor.rgb = applyIcc3DLut(pixColor.rgb);
+        pixColor.rgb *= pixColor.a;
+    } else {
+        pixColor.rgb = convertMatrix * pixColor.rgb;
+        pixColor = toNit(pixColor, srcTFRange);
+        pixColor.rgb *= pixColor.a;
+        mat3 dstxyz = primaries2xyz(dstPrimaries);
+        pixColor = tonemap(pixColor, dstxyz);
+        pixColor = fromLinearNit(pixColor, dstTF, dstTFRange);
+        if ((srcTF == CM_TRANSFER_FUNCTION_SRGB || srcTF == CM_TRANSFER_FUNCTION_GAMMA22) && dstTF == CM_TRANSFER_FUNCTION_ST2084_PQ) {
+            pixColor = saturate(pixColor, dstxyz, sdrSaturation);
+            pixColor.rgb *= sdrBrightnessMultiplier;
+        }
+    }
     return pixColor;
 }

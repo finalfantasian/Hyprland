@@ -10,6 +10,13 @@ uniform float brightness;
 
 #include "CM.glsl"
 #include "gain.glsl"
+uniform int sourceTF; // eTransferFunction
+uniform int targetTF; // eTransferFunction 
+
+float gain(float x, float k) {
+    float a = 0.5 * pow(2.0 * ((x < 0.5) ? x : 1.0 - x), k);
+    return (x < 0.5) ? a : 1.0 - a;
+}
 
 layout(location = 0) out vec4 fragColor;
 void main() {
