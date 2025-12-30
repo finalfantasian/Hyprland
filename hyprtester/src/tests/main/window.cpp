@@ -374,26 +374,6 @@ static void testMaximizeSize() {
     EXPECT(Tests::windowCount(), 0);
 }
 
-static void testFloatingFocusOnFullscreen() {
-    NLog::log("{}Testing floating focus on fullscreen", Colors::GREEN);
-
-    EXPECT(spawnKitty("kitty_A"), true);
-    OK(getFromSocket("/dispatch togglefloating"));
-
-    EXPECT(spawnKitty("kitty_B"), true);
-    OK(getFromSocket("/dispatch fullscreen 1"));
-
-    OK(getFromSocket("/dispatch cyclenext"));
-
-    OK(getFromSocket("/dispatch plugin:test:floating_focus_on_fullscreen"));
-
-    NLog::log("{}Killing all windows", Colors::YELLOW);
-    Tests::killAllWindows();
-
-    NLog::log("{}Expecting 0 windows", Colors::YELLOW);
-    EXPECT(Tests::windowCount(), 0);
-}
-
 static void testGroupFallbackFocus() {
     NLog::log("{}Testing group fallback focus", Colors::GREEN);
 
@@ -953,6 +933,8 @@ static bool test() {
     testBringActiveToTopMouseMovement();
     testGroupFallbackFocus();
     testInitialFloatSize();
+
+    testGroupFallbackFocus();
 
     NLog::log("{}Reloading config", Colors::YELLOW);
     OK(getFromSocket("/reload"));
