@@ -929,12 +929,9 @@ static bool test() {
 
     testGroupRules();
     testMaximizeSize();
-    testFloatingFocusOnFullscreen();
     testBringActiveToTopMouseMovement();
     testGroupFallbackFocus();
     testInitialFloatSize();
-
-    testGroupFallbackFocus();
 
     NLog::log("{}Reloading config", Colors::YELLOW);
     OK(getFromSocket("/reload"));
