@@ -231,7 +231,7 @@ in
         ''}
       '';
 
-      passthru.providedSessions = ["hyprland"];
+      passthru.providedSessions = ["hyprland"] ++ optionals withSystemd ["hyprland-uwsm"];
 
       meta = {
         homepage = "https://github.com/hyprwm/Hyprland";
