@@ -593,6 +593,11 @@ static bool test() {
     NLog::log("{}Killing all windows", Colors::YELLOW);
     Tests::killAllWindows();
 
+    testMultimonBAF();
+
+    // destroy the headless output
+    OK(getFromSocket("/output remove HEADLESS-3"));
+
     testSpecialWorkspaceFullscreen();
 
     testAsymmetricGaps();
