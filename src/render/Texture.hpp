@@ -51,6 +51,9 @@ class CTexture {
     uint32_t                    m_drmFormat     = 0; // for shm
     bool                        m_isSynchronous = false;
 
+    GLenum                      magFilter = GL_LINEAR; // useNearestNeighbor overwrites these
+    GLenum                      minFilter = GL_LINEAR;
+
   private:
     enum eTextureParam : uint8_t {
         TEXTURE_PAR_WRAP_S = 0,
