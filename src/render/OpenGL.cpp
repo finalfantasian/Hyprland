@@ -1772,8 +1772,8 @@ void CHyprOpenGLImpl::renderTextureInternal(SP<CTexture> tex, const CBox& box, c
         tex->setTexParameter(GL_TEXTURE_MAG_FILTER, GL_NEAREST);
         tex->setTexParameter(GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     } else {
-        tex->setTexParameter(GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-        tex->setTexParameter(GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        tex->setTexParameter(GL_TEXTURE_MAG_FILTER, tex->magFilter);
+        tex->setTexParameter(GL_TEXTURE_MIN_FILTER, tex->minFilter);
     }
 
     shader->setUniformMatrix3fv(SHADER_PROJ, 1, GL_TRUE, glMatrix.getMatrix());
@@ -1953,8 +1953,8 @@ void CHyprOpenGLImpl::renderTexturePrimitive(SP<CTexture> tex, const CBox& box) 
         tex->setTexParameter(GL_TEXTURE_MAG_FILTER, GL_NEAREST);
         tex->setTexParameter(GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     } else {
-        tex->setTexParameter(GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-        tex->setTexParameter(GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        tex->setTexParameter(GL_TEXTURE_MAG_FILTER, tex->magFilter);
+        tex->setTexParameter(GL_TEXTURE_MIN_FILTER, tex->minFilter);
     }
 
     useProgram(shader->program);
