@@ -1742,6 +1742,10 @@ uint8_t CMonitor::isTearingBlocked(bool full) {
         }
     }
 
+    // TODO: remove this when kernel allows tearing + hw cursor updated
+    if (g_pPointerManager->hasVisibleHWCursor(m_self.lock()))
+        reasons |= TC_HW_CURSOR;
+
     if (m_solitaryClient.expired()) {
         reasons |= TC_CANDIDATE;
         return reasons;
@@ -1781,12 +1785,6 @@ uint16_t CMonitor::isDSBlocked(bool full) {
             if (!full)
                 return reasons;
         }
-    }
-
-    if (m_tearingState.activelyTearing) {
-        reasons |= DS_BLOCK_TEARING;
-        if (!full)
-            return reasons;
     }
 
     if (!m_mirrors.empty() || isMirror()) {
@@ -1880,7 +1878,7 @@ bool CMonitor::attemptDirectScanout() {
         }
 
         //#TODO this entire bit is bootleg deluxe, above bit is to not make vrr go down the drain, returning early here means fifo gets forever locked.
-        if (PSURFACE->m_fifo && *PSAMEFIFO)
+        if (PSURFACE->m_fifo && !m_tearingState.activelyTearing && *PSAMEFIFO)
             PSURFACE->m_stateQueue.unlockFirst(LOCK_REASON_FIFO);
 
         return true;
