@@ -1817,8 +1817,11 @@ uint16_t CMonitor::isDSBlocked(bool full) {
             return reasons;
     }
 
-    const bool surfaceIsHDR = PSURFACE->m_colorManagement.valid() && (PSURFACE->m_colorManagement->isHDR() || PSURFACE->m_colorManagement->isWindowsScRGB());
-    if (needsCM() && *PNONSHADER != CM_NS_IGNORE && !canNoShaderCM() && ((inHDR() && (*PPASS == 0 || !surfaceIsHDR)) || (!inHDR() && (*PPASS != 1 || surfaceIsHDR))))
+    const bool surfaceIsHDR   = PSURFACE->m_colorManagement.valid() && PSURFACE->m_colorManagement->isHDR();
+    const bool surfaceIsScRGB = surfaceIsHDR && PSURFACE->m_colorManagement->isWindowsScRGB();
+
+    if (needsCM() && (*PNONSHADER != CM_NS_IGNORE || surfaceIsScRGB) && !canNoShaderCM() &&
+        ((inHDR() && (*PPASS == 0 || !surfaceIsHDR || surfaceIsScRGB)) || (!inHDR() && (*PPASS != 1 || surfaceIsHDR))))
         reasons |= DS_BLOCK_CM;
 
     return reasons;
