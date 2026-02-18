@@ -954,6 +954,8 @@ static bool test() {
     testGroupFallbackFocus();
     testInitialFloatSize();
 
+    testGroupFallbackFocus();
+
     NLog::log("{}Reloading config", Colors::YELLOW);
     OK(getFromSocket("/reload"));
 

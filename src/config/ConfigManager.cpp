@@ -778,6 +778,7 @@ CConfigManager::CConfigManager() {
     registerConfigVar("render:new_render_scheduling", Hyprlang::INT{0});
     registerConfigVar("render:non_shader_cm", Hyprlang::INT{3});
     registerConfigVar("render:cm_sdr_eotf", Hyprlang::INT{0});
+    registerConfigVar("render:icc_vcgt_enabled", Hyprlang::INT{1});
 
     registerConfigVar("ecosystem:no_update_news", Hyprlang::INT{0});
     registerConfigVar("ecosystem:no_donation_nag", Hyprlang::INT{0});
@@ -851,6 +852,7 @@ CConfigManager::CConfigManager() {
     m_config->addSpecialConfigValue("monitorv2", "min_luminance", Hyprlang::FLOAT{-1.0});
     m_config->addSpecialConfigValue("monitorv2", "max_luminance", Hyprlang::INT{-1});
     m_config->addSpecialConfigValue("monitorv2", "max_avg_luminance", Hyprlang::INT{-1});
+    m_config->addSpecialConfigValue("monitorv2", "icc", Hyprlang::STRING{""});
 
     // windowrule v3
     m_config->addSpecialCategory("windowrule", {.key = "name"});
@@ -880,7 +882,7 @@ CConfigManager::CConfigManager() {
     m_config->registerHandler(&::handleSubmap, "submap", {false});
     m_config->registerHandler(&::handlePlugin, "plugin", {false});
     m_config->registerHandler(&::handlePermission, "permission", {false});
-    m_config->registerHandler(&::handleGesture, "gesture", {false});
+    m_config->registerHandler(&::handleGesture, "gesture", {true});
     m_config->registerHandler(&::handleEnv, "env", {true});
 
     // windowrulev2 and layerrulev2 errors
@@ -1226,6 +1228,10 @@ std::optional<std::string> CConfigManager::handleMonitorv2(const std::string& ou
     VAL = m_config->getSpecialConfigValuePtr("monitorv2", "max_avg_luminance", output.c_str());
     if (VAL && VAL->m_bSetByUser)
         parser.rule().maxAvgLuminance = std::any_cast<Hyprlang::INT>(VAL->getValue());
+
+    VAL = m_config->getSpecialConfigValuePtr("monitorv2", "icc", output.c_str());
+    if (VAL && VAL->m_bSetByUser)
+        parser.rule().iccFile = std::any_cast<Hyprlang::STRING>(VAL->getValue());
 
     auto newrule = parser.rule();
 
@@ -2224,6 +2230,15 @@ bool CMonitorRuleParser::parseVRR(const std::string& value) {
     return true;
 }
 
+bool CMonitorRuleParser::parseICC(const std::string& val) {
+    if (val.empty()) {
+        m_error += "invalid icc ";
+        return false;
+    }
+    m_rule.iccFile = val;
+    return true;
+}
+
 void CMonitorRuleParser::setDisabled() {
     m_rule.disabled = true;
 }
@@ -2317,6 +2332,9 @@ std::optional<std::string> CConfigManager::handleMonitor(const std::string& comm
             argno++;
         } else if (ARGS[argno] == "vrr") {
             parser.parseVRR(std::string(ARGS[argno + 1]));
+            argno++;
+        } else if (ARGS[argno] == "icc") {
+            parser.parseICC(std::string(ARGS[argno + 1]));
             argno++;
         } else if (ARGS[argno] == "workspace") {
             const auto& [id, name, isAutoID] = getWorkspaceIDNameFromString(std::string(ARGS[argno + 1]));
@@ -2861,9 +2879,17 @@ std::optional<std::string> CConfigManager::handleGesture(const std::string& comm
     if (direction == TRACKPAD_GESTURE_DIR_NONE)
         return std::format("Invalid direction: {}", data[1]);
 
-    int      startDataIdx = 2;
-    uint32_t modMask      = 0;
-    float    deltaScale   = 1.F;
+    int      startDataIdx   = 2;
+    uint32_t modMask        = 0;
+    float    deltaScale     = 1.F;
+    bool     disableInhibit = false;
+
+    for (const auto arg : command.substr(7)) {
+        switch (arg) {
+            case 'p': disableInhibit = true; break;
+            default: return "gesture: invalid flag";
+        }
+    }
 
     while (true) {
 
@@ -2886,23 +2912,26 @@ std::optional<std::string> CConfigManager::handleGesture(const std::string& comm
 
     if (data[startDataIdx] == "dispatcher")
         result = g_pTrackpadGestures->addGesture(makeUnique<CDispatcherTrackpadGesture>(std::string{data[startDataIdx + 1]}, data.join(",", startDataIdx + 2)), fingerCount,
-                                                 direction, modMask, deltaScale);
+                                                 direction, modMask, deltaScale, disableInhibit);
     else if (data[startDataIdx] == "workspace")
-        result = g_pTrackpadGestures->addGesture(makeUnique<CWorkspaceSwipeGesture>(), fingerCount, direction, modMask, deltaScale);
+        result = g_pTrackpadGestures->addGesture(makeUnique<CWorkspaceSwipeGesture>(), fingerCount, direction, modMask, deltaScale, disableInhibit);
     else if (data[startDataIdx] == "resize")
-        result = g_pTrackpadGestures->addGesture(makeUnique<CResizeTrackpadGesture>(), fingerCount, direction, modMask, deltaScale);
+        result = g_pTrackpadGestures->addGesture(makeUnique<CResizeTrackpadGesture>(), fingerCount, direction, modMask, deltaScale, disableInhibit);
     else if (data[startDataIdx] == "move")
-        result = g_pTrackpadGestures->addGesture(makeUnique<CMoveTrackpadGesture>(), fingerCount, direction, modMask, deltaScale);
+        result = g_pTrackpadGestures->addGesture(makeUnique<CMoveTrackpadGesture>(), fingerCount, direction, modMask, deltaScale, disableInhibit);
     else if (data[startDataIdx] == "special")
-        result = g_pTrackpadGestures->addGesture(makeUnique<CSpecialWorkspaceGesture>(std::string{data[startDataIdx + 1]}), fingerCount, direction, modMask, deltaScale);
+        result =
+            g_pTrackpadGestures->addGesture(makeUnique<CSpecialWorkspaceGesture>(std::string{data[startDataIdx + 1]}), fingerCount, direction, modMask, deltaScale, disableInhibit);
     else if (data[startDataIdx] == "close")
-        result = g_pTrackpadGestures->addGesture(makeUnique<CCloseTrackpadGesture>(), fingerCount, direction, modMask, deltaScale);
+        result = g_pTrackpadGestures->addGesture(makeUnique<CCloseTrackpadGesture>(), fingerCount, direction, modMask, deltaScale, disableInhibit);
     else if (data[startDataIdx] == "float")
-        result = g_pTrackpadGestures->addGesture(makeUnique<CFloatTrackpadGesture>(std::string{data[startDataIdx + 1]}), fingerCount, direction, modMask, deltaScale);
+        result =
+            g_pTrackpadGestures->addGesture(makeUnique<CFloatTrackpadGesture>(std::string{data[startDataIdx + 1]}), fingerCount, direction, modMask, deltaScale, disableInhibit);
     else if (data[startDataIdx] == "fullscreen")
-        result = g_pTrackpadGestures->addGesture(makeUnique<CFullscreenTrackpadGesture>(std::string{data[startDataIdx + 1]}), fingerCount, direction, modMask, deltaScale);
+        result = g_pTrackpadGestures->addGesture(makeUnique<CFullscreenTrackpadGesture>(std::string{data[startDataIdx + 1]}), fingerCount, direction, modMask, deltaScale,
+                                                 disableInhibit);
     else if (data[startDataIdx] == "unset")
-        result = g_pTrackpadGestures->removeGesture(fingerCount, direction, modMask, deltaScale);
+        result = g_pTrackpadGestures->removeGesture(fingerCount, direction, modMask, deltaScale, disableInhibit);
     else
         return std::format("Invalid gesture: {}", data[startDataIdx]);
 
