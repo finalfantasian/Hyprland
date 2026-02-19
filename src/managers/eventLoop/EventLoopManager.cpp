@@ -26,7 +26,10 @@ CEventLoopManager::~CEventLoopManager() {
         wl_event_source_remove(eventSourceData.eventSource);
     }
 
-    m_readableWaiters.clear();
+    for (auto const& w : m_readableWaiters) {
+        if (w->source != nullptr)
+            wl_event_source_remove(w->source);
+    }
 
     if (m_wayland.eventSource)
         wl_event_source_remove(m_wayland.eventSource);
@@ -37,21 +40,14 @@ CEventLoopManager::~CEventLoopManager() {
 }
 
 static int timerWrite(int fd, uint32_t mask, void* data) {
-    if (!CFileDescriptor::isReadable(fd))
-        Log::logger->log(Log::ERR, "timerWrite: triggered a non readable event on fd : {}", fd);
-    else {
-        uint64_t expirations;
-        read(fd, &expirations, sizeof(expirations));
-    }
-
     g_pEventLoopManager->onTimerFire();
-    return 0;
+    return 1;
 }
 
 static int aquamarineFDWrite(int fd, uint32_t mask, void* data) {
     auto POLLFD = sc<Aquamarine::SPollFD*>(data);
     POLLFD->onSignal();
-    return 0;
+    return 1;
 }
 
 static int configWatcherWrite(int fd, uint32_t mask, void* data) {
@@ -60,21 +56,13 @@ static int configWatcherWrite(int fd, uint32_t mask, void* data) {
 }
 
 static int handleWaiterFD(int fd, uint32_t mask, void* data) {
-    auto waiter = sc<CEventLoopManager::SReadableWaiter*>(data);
-
-    if (!waiter) {
-        Log::logger->log(Log::ERR, "handleWaiterFD: failed casting waiter");
-        return 0;
-    }
-
     if (mask & (WL_EVENT_HANGUP | WL_EVENT_ERROR)) {
         Log::logger->log(Log::ERR, "handleWaiterFD: readable waiter error");
-        g_pEventLoopManager->onFdReadableFail(waiter);
         return 0;
     }
 
     if (mask & WL_EVENT_READABLE)
-        g_pEventLoopManager->onFdReadable(waiter);
+        g_pEventLoopManager->onFdReadable(sc<CEventLoopManager::SReadableWaiter*>(data));
 
     return 0;
 }
@@ -85,11 +73,6 @@ void CEventLoopManager::onFdReadable(SReadableWaiter* waiter) {
     // ???
     if (it == m_readableWaiters.end())
         return;
-
-    if (waiter->source) { // remove even_source if fn() somehow causes a reentry
-        wl_event_source_remove(waiter->source);
-        waiter->source = nullptr;
-    }
 
     UP<SReadableWaiter> taken = std::move(*it);
     m_readableWaiters.erase(it);
@@ -199,12 +182,12 @@ void CEventLoopManager::doLater(const std::function<void()>& fn) {
         m_wayland.loop,
         [](void* data) {
             auto IDLE = sc<CEventLoopManager::SIdleData*>(data);
-            auto fns  = std::move(IDLE->fns);
+            auto cpy  = IDLE->fns;
             IDLE->fns.clear();
             IDLE->eventSource = nullptr;
-            for (auto& f : fns) {
-                if (f)
-                    f();
+            for (auto const& c : cpy) {
+                if (c)
+                    c();
             }
         },
         &m_idle);
