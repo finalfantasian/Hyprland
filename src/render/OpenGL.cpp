@@ -1783,69 +1783,6 @@ void CHyprOpenGLImpl::renderTextureInternal(SP<CTexture> tex, const CBox& box, c
         tex->setTexParameter(GL_TEXTURE_MIN_FILTER, tex->minFilter);
     }
 
-    const bool  isHDRSurface      = m_renderData.surface.valid() && m_renderData.surface->m_colorManagement.valid() ? m_renderData.surface->m_colorManagement->isHDR() : false;
-    const bool  canPassHDRSurface = isHDRSurface && !m_renderData.surface->m_colorManagement->isWindowsScRGB(); // windows scRGB requires CM shader
-
-    const auto  imageDescription = m_renderData.surface.valid() && m_renderData.surface->m_colorManagement.valid() ?
-         CImageDescription::from(m_renderData.surface->m_colorManagement->imageDescription()) :
-         (data.cmBackToSRGB ? data.cmBackToSRGBSource->m_imageDescription : DEFAULT_IMAGE_DESCRIPTION);
-
-    static auto PSDREOTF      = CConfigValue<Hyprlang::INT>("render:cm_sdr_eotf");
-    auto        chosenSdrEotf = *PSDREOTF != 3 ? NColorManagement::CM_TRANSFER_FUNCTION_GAMMA22 : NColorManagement::CM_TRANSFER_FUNCTION_SRGB;
-    const auto  targetImageDescription =
-        data.cmBackToSRGB ? CImageDescription::from(NColorManagement::SImageDescription{.transferFunction = chosenSdrEotf}) : m_renderData.pMonitor->m_imageDescription;
-
-    const bool skipCM = !*PENABLECM || !m_cmSupported                                     /* CM unsupported or disabled */
-        || m_renderData.pMonitor->doesNoShaderCM()                                        /* no shader needed */
-        || (imageDescription->id() == targetImageDescription->id() && !data.cmBackToSRGB) /* Source and target have the same image description */
-        || (((*PPASS && canPassHDRSurface) ||
-             (*PPASS == 1 && !isHDRSurface && m_renderData.pMonitor->m_cmType != NCMType::CM_HDR && m_renderData.pMonitor->m_cmType != NCMType::CM_HDR_EDID)) &&
-            m_renderData.pMonitor->inFullscreenMode()) /* Fullscreen window with pass cm enabled */;
-
-    if (data.discardActive)
-        shaderFeatures |= SH_FEAT_DISCARD;
-
-    if (!usingFinalShader) {
-        if (data.allowDim && m_renderData.currentWindow && (m_renderData.currentWindow->m_notRespondingTint->value() > 0 || m_renderData.currentWindow->m_dimPercent->value() > 0))
-            shaderFeatures |= SH_FEAT_TINT;
-
-        if (data.round > 0)
-            shaderFeatures |= SH_FEAT_ROUNDING;
-
-        if (!skipCM) {
-            shaderFeatures |= SH_FEAT_CM;
-
-            const bool  needsSDRmod     = isSDR2HDR(imageDescription->value(), targetImageDescription->value());
-            const bool  needsHDRmod     = !needsSDRmod && isHDR2SDR(imageDescription->value(), targetImageDescription->value());
-            const float maxLuminance    = needsHDRmod ?
-                   imageDescription->value().getTFMaxLuminance(-1) :
-                   (imageDescription->value().luminances.max > 0 ? imageDescription->value().luminances.max : imageDescription->value().luminances.reference);
-            const auto  dstMaxLuminance = targetImageDescription->value().luminances.max > 0 ? targetImageDescription->value().luminances.max : 10000;
-
-            if (maxLuminance >= dstMaxLuminance * 1.01)
-                shaderFeatures |= SH_FEAT_TONEMAP;
-
-            if (!data.cmBackToSRGB &&
-                (imageDescription->value().transferFunction == CM_TRANSFER_FUNCTION_SRGB || imageDescription->value().transferFunction == CM_TRANSFER_FUNCTION_GAMMA22) &&
-                targetImageDescription->value().transferFunction == CM_TRANSFER_FUNCTION_ST2084_PQ &&
-                ((m_renderData.pMonitor->m_sdrSaturation > 0 && m_renderData.pMonitor->m_sdrSaturation != 1.0f) ||
-                 (m_renderData.pMonitor->m_sdrBrightness > 0 && m_renderData.pMonitor->m_sdrBrightness != 1.0f)))
-                shaderFeatures |= SH_FEAT_SDR_MOD;
-        }
-    }
-
-    if (!shader)
-        shader = getSurfaceShader(shaderFeatures);
-
-    shader = useShader(shader);
-
-    if (!skipCM && !usingFinalShader) {
-        if (data.cmBackToSRGB)
-            passCMUniforms(shader, imageDescription, targetImageDescription, true, -1, -1);
-        else
-            passCMUniforms(shader, imageDescription);
-    }
-
     shader->setUniformMatrix3fv(SHADER_PROJ, 1, GL_TRUE, glMatrix.getMatrix());
     shader->setUniformInt(SHADER_TEX, 0);
 
