@@ -892,7 +892,10 @@ void CHyprOpenGLImpl::end() {
         m_renderData.outFB->bind();
         blend(false);
 
-        if LIKELY (m_finalScreenShader->program() < 1 && !g_pHyprRenderer->m_crashingInProgress)
+        const auto PRIMITIVE_BLOCKED =
+            m_finalScreenShader.program >= 1 || g_pHyprRenderer->m_crashingInProgress || m_renderData.pMonitor->m_imageDescription->value() != SImageDescription{};
+
+        if (!PRIMITIVE_BLOCKED || g_pHyprRenderer->m_renderMode != RENDER_MODE_NORMAL)
             renderTexturePrimitive(m_renderData.pCurrentMonData->offloadFB.getTexture(), monbox);
         else // we need to use renderTexture if we do any CM whatsoever.
             renderTexture(m_renderData.pCurrentMonData->offloadFB.getTexture(), monbox, {.finalMonitorCM = true});
