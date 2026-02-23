@@ -1,8 +1,9 @@
 #include "Logger.hpp"
 #include "RollingLogFollow.hpp"
 
-#include "../../event/EventBus.hpp"
+#include "../../defines.hpp"
 
+#include "../../managers/HookSystemManager.hpp"
 #include "../../config/ConfigValue.hpp"
 
 using namespace Log;
@@ -38,7 +39,7 @@ void CLogger::initIS(const std::string_view& IS) {
 }
 
 void CLogger::initCallbacks() {
-    static auto P = Event::bus()->m_events.config.reloaded.listen([this]() { recheckCfg(); });
+    static auto P = g_pHookSystem->hookDynamic("configReloaded", [this](void* hk, SCallbackInfo& info, std::any param) { recheckCfg(); });
     recheckCfg();
 }
 

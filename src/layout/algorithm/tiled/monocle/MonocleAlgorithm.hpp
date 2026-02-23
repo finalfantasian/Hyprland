@@ -1,7 +1,7 @@
 #pragma once
 
 #include "../../TiledAlgorithm.hpp"
-#include "../../../../helpers/signal/Signal.hpp"
+#include "../../../../managers/HookSystemManager.hpp"
 
 #include <vector>
 
@@ -38,7 +38,7 @@ namespace Layout::Tiled {
 
       private:
         std::vector<SP<SMonocleTargetData>> m_targetDatas;
-        CHyprSignalListener                 m_focusCallback;
+        SP<HOOK_CALLBACK_FN>                m_focusCallback;
 
         int                                 m_currentVisibleIndex = 0;
 

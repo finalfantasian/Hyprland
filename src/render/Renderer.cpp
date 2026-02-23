@@ -9,6 +9,7 @@
 #include "../managers/CursorManager.hpp"
 #include "../managers/PointerManager.hpp"
 #include "../managers/input/InputManager.hpp"
+#include "../managers/HookSystemManager.hpp"
 #include "../managers/animation/AnimationManager.hpp"
 #include "../desktop/view/Window.hpp"
 #include "../desktop/view/LayerSurface.hpp"
@@ -29,7 +30,6 @@
 #include "../layout/LayoutManager.hpp"
 #include "../layout/space/Space.hpp"
 #include "../i18n/Engine.hpp"
-#include "../event/EventBus.hpp"
 #include "helpers/CursorShapes.hpp"
 #include "helpers/Monitor.hpp"
 #include "pass/TexPassElement.hpp"
@@ -41,7 +41,6 @@
 #include "../protocols/ColorManagement.hpp"
 #include "../protocols/types/ContentType.hpp"
 #include "../helpers/MiscFunctions.hpp"
-#include "../event/EventBus.hpp"
 #include "render/OpenGL.hpp"
 
 #include <hyprutils/utils/ScopeGuard.hpp>
@@ -114,7 +113,7 @@ CHyprRenderer::CHyprRenderer() {
 
     // cursor hiding stuff
 
-    static auto P = Event::bus()->m_events.input.keyboard.key.listen([&](IKeyboard::SKeyEvent e, Event::SCallbackInfo&) {
+    static auto P = g_pHookSystem->hookDynamic("keyPress", [&](void* self, SCallbackInfo& info, std::any param) {
         if (m_cursorHiddenConditions.hiddenOnKeyboard)
             return;
 
@@ -122,7 +121,7 @@ CHyprRenderer::CHyprRenderer() {
         ensureCursorRenderingMode();
     });
 
-    static auto P2 = Event::bus()->m_events.input.mouse.move.listen([&](Vector2D pos, Event::SCallbackInfo&) {
+    static auto P2 = g_pHookSystem->hookDynamic("mouseMove", [&](void* self, SCallbackInfo& info, std::any param) {
         if (!m_cursorHiddenConditions.hiddenOnKeyboard && m_cursorHiddenConditions.hiddenOnTouch == g_pInputManager->m_lastInputTouch &&
             m_cursorHiddenConditions.hiddenOnTablet == g_pInputManager->m_lastInputTablet && !m_cursorHiddenConditions.hiddenOnTimeout)
             return;
@@ -134,7 +133,7 @@ CHyprRenderer::CHyprRenderer() {
         ensureCursorRenderingMode();
     });
 
-    static auto P3 = Event::bus()->m_events.monitor.focused.listen([&](PHLMONITOR mon) {
+    static auto P3 = g_pHookSystem->hookDynamic("focusedMon", [&](void* self, SCallbackInfo& info, std::any param) {
         g_pEventLoopManager->doLater([this]() {
             if (!g_pHyprError->active())
                 return;
@@ -144,9 +143,11 @@ CHyprRenderer::CHyprRenderer() {
         });
     });
 
-    static auto P4 = Event::bus()->m_events.window.updateRules.listen([&](PHLWINDOW window) {
-        if (window->m_ruleApplicator->renderUnfocused().valueOrDefault())
-            addWindowToRenderUnfocused(window);
+    static auto P4 = g_pHookSystem->hookDynamic("windowUpdateRules", [&](void* self, SCallbackInfo& info, std::any param) {
+        const auto PWINDOW = std::any_cast<PHLWINDOW>(param);
+
+        if (PWINDOW->m_ruleApplicator->renderUnfocused().valueOrDefault())
+            addWindowToRenderUnfocused(PWINDOW);
     });
 
     m_cursorTicker = wl_event_loop_add_timer(g_pCompositor->m_wlEventLoop, cursorTicker, nullptr);
@@ -289,7 +290,7 @@ bool CHyprRenderer::shouldRenderWindow(PHLWINDOW pWindow) {
 void CHyprRenderer::renderWorkspaceWindowsFullscreen(PHLMONITOR pMonitor, PHLWORKSPACE pWorkspace, const Time::steady_tp& time) {
     PHLWINDOW pWorkspaceWindow = nullptr;
 
-    Event::bus()->m_events.render.stage.emit(RENDER_PRE_WINDOWS);
+    EMIT_HOOK_EVENT("render", RENDER_PRE_WINDOWS);
 
     // loop over the tiled windows that are fading out
     for (auto const& w : g_pCompositor->m_windows) {
@@ -380,7 +381,7 @@ void CHyprRenderer::renderWorkspaceWindowsFullscreen(PHLMONITOR pMonitor, PHLWOR
 void CHyprRenderer::renderWorkspaceWindows(PHLMONITOR pMonitor, PHLWORKSPACE pWorkspace, const Time::steady_tp& time) {
     PHLWINDOW lastWindow;
 
-    Event::bus()->m_events.render.stage.emit(RENDER_PRE_WINDOWS);
+    EMIT_HOOK_EVENT("render", RENDER_PRE_WINDOWS);
 
     std::vector<PHLWINDOWREF> windows, tiledFadingOut;
     windows.reserve(g_pCompositor->m_windows.size());
@@ -544,7 +545,7 @@ void CHyprRenderer::renderWindow(PHLWINDOW pWindow, PHLMONITOR pMonitor, const T
     // for plugins
     g_pHyprOpenGL->m_renderData.currentWindow = pWindow;
 
-    Event::bus()->m_events.render.stage.emit(RENDER_PRE_WINDOW);
+    EMIT_HOOK_EVENT("render", RENDER_PRE_WINDOW);
 
     const auto fullAlpha = renderdata.alpha * renderdata.fadeAlpha;
 
@@ -728,7 +729,7 @@ void CHyprRenderer::renderWindow(PHLWINDOW pWindow, PHLMONITOR pMonitor, const T
         }
     }
 
-    Event::bus()->m_events.render.stage.emit(RENDER_POST_WINDOW);
+    EMIT_HOOK_EVENT("render", RENDER_POST_WINDOW);
 
     g_pHyprOpenGL->m_renderData.currentWindow.reset();
 }
@@ -940,7 +941,7 @@ void CHyprRenderer::renderAllClientsForWorkspace(PHLMONITOR pMonitor, PHLWORKSPA
             renderLayer(ls.lock(), pMonitor, time);
         }
 
-        Event::bus()->m_events.render.stage.emit(RENDER_POST_WALLPAPER);
+        EMIT_HOOK_EVENT("render", RENDER_POST_WALLPAPER);
 
         for (auto const& ls : pMonitor->m_layerSurfaceLayers[ZWLR_LAYER_SHELL_V1_LAYER_BOTTOM]) {
             renderLayer(ls.lock(), pMonitor, time);
@@ -964,7 +965,7 @@ void CHyprRenderer::renderAllClientsForWorkspace(PHLMONITOR pMonitor, PHLWORKSPA
             renderLayer(ls.lock(), pMonitor, time);
         }
 
-        Event::bus()->m_events.render.stage.emit(RENDER_POST_WALLPAPER);
+        EMIT_HOOK_EVENT("render", RENDER_POST_WALLPAPER);
 
         for (auto const& ls : pMonitor->m_layerSurfaceLayers[ZWLR_LAYER_SHELL_V1_LAYER_BOTTOM]) {
             renderLayer(ls.lock(), pMonitor, time);
@@ -1029,7 +1030,7 @@ void CHyprRenderer::renderAllClientsForWorkspace(PHLMONITOR pMonitor, PHLWORKSPA
         renderWindow(w, pMonitor, time, true, RENDER_PASS_ALL);
     }
 
-    Event::bus()->m_events.render.stage.emit(RENDER_POST_WINDOWS);
+    EMIT_HOOK_EVENT("render", RENDER_POST_WINDOWS);
 
     // Render surfaces above windows for monitor
     for (auto const& ls : pMonitor->m_layerSurfaceLayers[ZWLR_LAYER_SHELL_V1_LAYER_TOP]) {
@@ -1329,7 +1330,7 @@ void CHyprRenderer::renderMonitor(PHLMONITOR pMonitor, bool commit) {
         pMonitor->m_drmFormat = pMonitor->m_prevDrmFormat;
     }
 
-    Event::bus()->m_events.render.pre.emit(pMonitor);
+    EMIT_HOOK_EVENT("preRender", pMonitor);
 
     const auto NOW = Time::steadyNow();
 
@@ -1344,7 +1345,7 @@ void CHyprRenderer::renderMonitor(PHLMONITOR pMonitor, bool commit) {
         return;
     }
 
-    Event::bus()->m_events.render.stage.emit(RENDER_PRE);
+    EMIT_HOOK_EVENT("render", RENDER_PRE);
 
     pMonitor->m_renderingActive = true;
 
@@ -1397,7 +1398,7 @@ void CHyprRenderer::renderMonitor(PHLMONITOR pMonitor, bool commit) {
             pMonitor->m_forceFullFrames = 0;
     }
 
-    Event::bus()->m_events.render.stage.emit(RENDER_BEGIN);
+    EMIT_HOOK_EVENT("render", RENDER_BEGIN);
 
     bool renderCursor = true;
 
@@ -1408,7 +1409,7 @@ void CHyprRenderer::renderMonitor(PHLMONITOR pMonitor, bool commit) {
             g_pHyprOpenGL->blend(false);
             g_pHyprOpenGL->renderMirrored();
             g_pHyprOpenGL->blend(true);
-            Event::bus()->m_events.render.stage.emit(RENDER_POST_MIRROR);
+            EMIT_HOOK_EVENT("render", RENDER_POST_MIRROR);
             renderCursor = false;
         } else {
             CBox renderBox = {0, 0, sc<int>(pMonitor->m_pixelSize.x), sc<int>(pMonitor->m_pixelSize.y)};
@@ -1461,7 +1462,7 @@ void CHyprRenderer::renderMonitor(PHLMONITOR pMonitor, bool commit) {
         m_renderPass.add(makeUnique<CRectPassElement>(data));
     }
 
-    Event::bus()->m_events.render.stage.emit(RENDER_LAST_MOMENT);
+    EMIT_HOOK_EVENT("render", RENDER_LAST_MOMENT);
 
     endRender();
 
@@ -1483,7 +1484,7 @@ void CHyprRenderer::renderMonitor(PHLMONITOR pMonitor, bool commit) {
 
     pMonitor->m_renderingActive = false;
 
-    Event::bus()->m_events.render.stage.emit(RENDER_POST);
+    EMIT_HOOK_EVENT("render", RENDER_POST);
 
     pMonitor->m_output->state->addDamage(frameDamage);
     pMonitor->m_output->state->setPresentationMode(shouldTear ? Aquamarine::eOutputPresentationMode::AQ_OUTPUT_PRESENTATION_IMMEDIATE :

@@ -10,7 +10,6 @@
 #include "../../../../desktop/history/WindowHistoryTracker.hpp"
 #include "../../../../helpers/Monitor.hpp"
 #include "../../../../Compositor.hpp"
-#include "../../../../event/EventBus.hpp"
 
 #include <hyprutils/string/VarList2.hpp>
 #include <hyprutils/string/ConstVarList.hpp>
@@ -23,14 +22,16 @@ using namespace Layout::Tiled;
 
 CMonocleAlgorithm::CMonocleAlgorithm() {
     // hook into focus changes to bring focused window to front
-    m_focusCallback = Event::bus()->m_events.window.active.listen([this](PHLWINDOW pWindow, Desktop::eFocusReason reason) {
-        if (!pWindow)
+    m_focusCallback = g_pHookSystem->hookDynamic("activeWindow", [this](void* hk, SCallbackInfo& info, std::any param) {
+        const auto PWINDOW = std::any_cast<Desktop::View::SWindowActiveEvent>(param).window;
+
+        if (!PWINDOW)
             return;
 
-        if (!pWindow->m_workspace->isVisible())
+        if (!PWINDOW->m_workspace->isVisible())
             return;
 
-        const auto TARGET = pWindow->layoutTarget();
+        const auto TARGET = PWINDOW->layoutTarget();
         if (!TARGET)
             return;
 

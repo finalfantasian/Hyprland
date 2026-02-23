@@ -10,11 +10,11 @@
 #include "../../xwayland/XWayland.hpp"
 #include "../../xwayland/Server.hpp"
 #include "../../managers/input/InputManager.hpp"
+#include "../../managers/HookSystemManager.hpp"
 #include "../../managers/cursor/CursorShapeOverrideController.hpp"
 #include "../../helpers/Monitor.hpp"
 #include "../../render/Renderer.hpp"
 #include "../../xwayland/Dnd.hpp"
-#include "../../event/EventBus.hpp"
 using namespace Hyprutils::OS;
 
 CWLDataOfferResource::CWLDataOfferResource(SP<CWlDataOffer> resource_, SP<IDataSource> source_) : m_source(source_), m_resource(resource_) {
@@ -586,26 +586,29 @@ void CWLDataDeviceProtocol::initiateDrag(WP<CWLDataSourceResource> currentSource
         });
     }
 
-    m_dnd.mouseButton = Event::bus()->m_events.input.mouse.button.listen([this](IPointer::SButtonEvent e, Event::SCallbackInfo&) {
-        if (e.state == WL_POINTER_BUTTON_STATE_RELEASED) {
+    m_dnd.mouseButton = g_pHookSystem->hookDynamic("mouseButton", [this](void* self, SCallbackInfo& info, std::any e) {
+        auto E = std::any_cast<IPointer::SButtonEvent>(e);
+        if (E.state == WL_POINTER_BUTTON_STATE_RELEASED) {
             LOGM(Log::DEBUG, "Dropping drag on mouseUp");
             dropDrag();
         }
     });
 
-    m_dnd.touchUp = Event::bus()->m_events.input.touch.up.listen([this](ITouch::SUpEvent e, Event::SCallbackInfo&) {
+    m_dnd.touchUp = g_pHookSystem->hookDynamic("touchUp", [this](void* self, SCallbackInfo& info, std::any e) {
         LOGM(Log::DEBUG, "Dropping drag on touchUp");
         dropDrag();
     });
 
-    m_dnd.tabletTip = Event::bus()->m_events.input.tablet.tip.listen([this](CTablet::STipEvent e, Event::SCallbackInfo&) {
-        if (!e.in) {
+    m_dnd.tabletTip = g_pHookSystem->hookDynamic("tabletTip", [this](void* self, SCallbackInfo& info, std::any e) {
+        auto E = std::any_cast<CTablet::STipEvent>(e);
+        if (!E.in) {
             LOGM(Log::DEBUG, "Dropping drag on tablet tipUp");
             dropDrag();
         }
     });
 
-    m_dnd.mouseMove = Event::bus()->m_events.input.mouse.move.listen([this](Vector2D pos, Event::SCallbackInfo&) {
+    m_dnd.mouseMove = g_pHookSystem->hookDynamic("mouseMove", [this](void* self, SCallbackInfo& info, std::any e) {
+        auto V = std::any_cast<const Vector2D>(e);
         if (m_dnd.focusedDevice && g_pSeatManager->m_state.dndPointerFocus) {
             auto surf = Desktop::View::CWLSurface::fromResource(g_pSeatManager->m_state.dndPointerFocus.lock());
 
@@ -617,12 +620,13 @@ void CWLDataDeviceProtocol::initiateDrag(WP<CWLDataSourceResource> currentSource
             if (!box.has_value())
                 return;
 
-            m_dnd.focusedDevice->sendMotion(Time::millis(Time::steadyNow()), pos - box->pos());
-            LOGM(Log::DEBUG, "Drag motion {}", pos - box->pos());
+            m_dnd.focusedDevice->sendMotion(Time::millis(Time::steadyNow()), V - box->pos());
+            LOGM(Log::DEBUG, "Drag motion {}", V - box->pos());
         }
     });
 
-    m_dnd.touchMove = Event::bus()->m_events.input.touch.motion.listen([this](ITouch::SMotionEvent e, Event::SCallbackInfo&) {
+    m_dnd.touchMove = g_pHookSystem->hookDynamic("touchMove", [this](void* self, SCallbackInfo& info, std::any e) {
+        auto E = std::any_cast<ITouch::SMotionEvent>(e);
         if (m_dnd.focusedDevice && g_pSeatManager->m_state.dndPointerFocus) {
             auto surf = Desktop::View::CWLSurface::fromResource(g_pSeatManager->m_state.dndPointerFocus.lock());
 
@@ -634,8 +638,8 @@ void CWLDataDeviceProtocol::initiateDrag(WP<CWLDataSourceResource> currentSource
             if (!box.has_value())
                 return;
 
-            m_dnd.focusedDevice->sendMotion(e.timeMs, e.pos);
-            LOGM(Log::DEBUG, "Drag motion {}", e.pos);
+            m_dnd.focusedDevice->sendMotion(E.timeMs, E.pos);
+            LOGM(Log::DEBUG, "Drag motion {}", E.pos);
         }
     });
 

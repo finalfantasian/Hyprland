@@ -70,14 +70,11 @@ struct SVersionInfo {
 class IHyprLayout;
 class IHyprWindowDecoration;
 struct SConfigValue;
-class Hypr_dummyClass {};
 
 namespace Layout {
     class ITiledAlgorithm;
     class IFloatingAlgorithm;
 };
-
-using HOOK_CALLBACK_FN = Hypr_dummyClass;
 
 /*
     These methods are for the plugin to implement
@@ -151,8 +148,6 @@ namespace HyprlandAPI {
     APICALL Hyprlang::CConfigValue* getConfigValue(HANDLE handle, const std::string& name);
 
     /*
-        Deprecated: doesn't do anything anymore, use Event::bus()
-
         Register a dynamic (function) callback to a selected event.
         Pointer will be free'd by Hyprland on unregisterCallback().
 
@@ -160,7 +155,7 @@ namespace HyprlandAPI {
 
         WARNING: Losing this pointer will unregister the callback!
     */
-    APICALL [[deprecated]] [[nodiscard]] SP<HOOK_CALLBACK_FN> registerCallbackDynamic(HANDLE handle, const std::string& event, HOOK_CALLBACK_FN fn);
+    APICALL [[nodiscard]] SP<HOOK_CALLBACK_FN> registerCallbackDynamic(HANDLE handle, const std::string& event, HOOK_CALLBACK_FN fn);
 
     /*
         Unregisters a callback. If the callback was dynamic, frees the memory.
