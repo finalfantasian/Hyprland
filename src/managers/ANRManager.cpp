@@ -3,13 +3,13 @@
 #include "../helpers/fs/FsUtils.hpp"
 #include "../debug/log/Logger.hpp"
 #include "../macros.hpp"
+#include "HookSystemManager.hpp"
 #include "../Compositor.hpp"
 #include "../protocols/XDGShell.hpp"
 #include "./eventLoop/EventLoopManager.hpp"
 #include "../config/ConfigValue.hpp"
 #include "../xwayland/XSurface.hpp"
 #include "../i18n/Engine.hpp"
-#include "../event/EventBus.hpp"
 
 using namespace Hyprutils::OS;
 
@@ -26,7 +26,9 @@ CANRManager::CANRManager() {
 
     m_active = true;
 
-    static auto P = Event::bus()->m_events.window.open.listen([this](PHLWINDOW window) {
+    static auto P = g_pHookSystem->hookDynamic("openWindow", [this](void* self, SCallbackInfo& info, std::any data) {
+        auto window = std::any_cast<PHLWINDOW>(data);
+
         for (const auto& d : m_data) {
             // Window is ANR dialog
             if (d->isRunning() && d->dialogBox->getPID() == window->getPID())
@@ -39,7 +41,9 @@ CANRManager::CANRManager() {
         m_data.emplace_back(makeShared<SANRData>(window));
     });
 
-    static auto P1 = Event::bus()->m_events.window.close.listen([this](PHLWINDOW window) {
+    static auto P1 = g_pHookSystem->hookDynamic("closeWindow", [this](void* self, SCallbackInfo& info, std::any data) {
+        auto window = std::any_cast<PHLWINDOW>(data);
+
         for (const auto& d : m_data) {
             if (!d->fitsWindow(window))
                 continue;

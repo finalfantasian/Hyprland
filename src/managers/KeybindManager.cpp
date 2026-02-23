@@ -16,6 +16,7 @@
 #include "TokenManager.hpp"
 #include "eventLoop/EventLoopManager.hpp"
 #include "debug/log/Logger.hpp"
+#include "../managers/HookSystemManager.hpp"
 #include "../managers/input/InputManager.hpp"
 #include "../managers/animation/DesktopAnimationManager.hpp"
 #include "../managers/EventManager.hpp"
@@ -31,7 +32,6 @@
 #include "../layout/algorithm/Algorithm.hpp"
 #include "../layout/algorithm/tiled/master/MasterAlgorithm.hpp"
 #include "../layout/algorithm/tiled/monocle/MonocleAlgorithm.hpp"
-#include "../event/EventBus.hpp"
 
 #include <optional>
 #include <iterator>
@@ -203,7 +203,8 @@ CKeybindManager::CKeybindManager() {
         g_pEventLoopManager->addTimer(m_repeatKeyTimer);
     }
 
-    static auto P = Event::bus()->m_events.config.reloaded.listen([this] {
+    static auto P = g_pHookSystem->hookDynamic("configReloaded", [this](void* hk, SCallbackInfo& info, std::any param) {
+        // clear cuz realloc'd
         m_activeKeybinds.clear();
         m_lastLongPressKeybind.reset();
         m_pressedSpecialBinds.clear();
@@ -2214,7 +2215,7 @@ SDispatchResult CKeybindManager::setSubmap(std::string submap) {
         m_currentSelectedSubmap.name = "";
         Log::logger->log(Log::DEBUG, "Reset active submap to the default one.");
         g_pEventManager->postEvent(SHyprIPCEvent{"submap", ""});
-        Event::bus()->m_events.keybinds.submap.emit(m_currentSelectedSubmap.name);
+        EMIT_HOOK_EVENT("submap", m_currentSelectedSubmap.name);
         return {};
     }
 
@@ -2223,7 +2224,7 @@ SDispatchResult CKeybindManager::setSubmap(std::string submap) {
             m_currentSelectedSubmap.name = submap;
             Log::logger->log(Log::DEBUG, "Changed keybind submap to {}", submap);
             g_pEventManager->postEvent(SHyprIPCEvent{"submap", submap});
-            Event::bus()->m_events.keybinds.submap.emit(m_currentSelectedSubmap.name);
+            EMIT_HOOK_EVENT("submap", m_currentSelectedSubmap.name);
             return {};
         }
     }
@@ -2583,7 +2584,7 @@ SDispatchResult CKeybindManager::pinActive(std::string args) {
         g_pCompositor->vectorToWindowUnified(g_pInputManager->getMouseCoordsInternal(), Desktop::View::RESERVED_EXTENTS | Desktop::View::INPUT_EXTENTS);
 
     g_pEventManager->postEvent(SHyprIPCEvent{"pin", std::format("{:x},{}", rc<uintptr_t>(PWINDOW.get()), sc<int>(PWINDOW->m_pinned))});
-    Event::bus()->m_events.window.pin.emit(PWINDOW);
+    EMIT_HOOK_EVENT("pin", PWINDOW);
 
     g_pHyprRenderer->damageWindow(PWINDOW, true);
 

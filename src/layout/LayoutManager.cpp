@@ -5,14 +5,14 @@
 
 #include "../config/ConfigManager.hpp"
 #include "../Compositor.hpp"
+#include "../managers/HookSystemManager.hpp"
 #include "../desktop/state/FocusState.hpp"
 #include "../desktop/view/Group.hpp"
-#include "../event/EventBus.hpp"
 
 using namespace Layout;
 
 CLayoutManager::CLayoutManager() {
-    static auto P = Event::bus()->m_events.monitor.layoutChanged.listen([] {
+    static auto P = g_pHookSystem->hookDynamic("monitorLayoutChanged", [](void* hk, SCallbackInfo& info, std::any param) {
         for (const auto& ws : g_pCompositor->getWorkspaces()) {
             ws->m_space->recheckWorkArea();
         }

@@ -26,6 +26,7 @@
 #include "../managers/animation/AnimationManager.hpp"
 #include "../managers/animation/DesktopAnimationManager.hpp"
 #include "../managers/input/InputManager.hpp"
+#include "../managers/HookSystemManager.hpp"
 #include "../hyprerror/HyprError.hpp"
 #include "../layout/LayoutManager.hpp"
 #include "../i18n/Engine.hpp"
@@ -33,7 +34,6 @@
 #include "time/Time.hpp"
 #include "../desktop/view/LayerSurface.hpp"
 #include "../desktop/state/FocusState.hpp"
-#include "../event/EventBus.hpp"
 #include "Drm.hpp"
 #include <aquamarine/output/Output.hpp>
 #include "debug/log/Logger.hpp"
@@ -74,7 +74,7 @@ CMonitor::~CMonitor() {
 }
 
 void CMonitor::onConnect(bool noRule) {
-    Event::bus()->m_events.monitor.preAdded.emit(m_self.lock());
+    EMIT_HOOK_EVENT("preMonitorAdded", m_self.lock());
     CScopeGuard x = {[]() { g_pCompositor->arrangeMonitors(); }};
 
     m_zoomAnimProgress->setValueAndWarp(0.F);
@@ -347,17 +347,17 @@ void CMonitor::onConnect(bool noRule) {
 
     g_pEventManager->postEvent(SHyprIPCEvent{"monitoradded", m_name});
     g_pEventManager->postEvent(SHyprIPCEvent{"monitoraddedv2", std::format("{},{},{}", m_id, m_name, m_shortDescription)});
-    Event::bus()->m_events.monitor.added.emit(m_self.lock());
+    EMIT_HOOK_EVENT("monitorAdded", m_self.lock());
 }
 
 void CMonitor::onDisconnect(bool destroy) {
-    Event::bus()->m_events.monitor.preRemoved.emit(m_self.lock());
+    EMIT_HOOK_EVENT("preMonitorRemoved", m_self.lock());
     CScopeGuard x = {[this]() {
         if (g_pCompositor->m_isShuttingDown)
             return;
         g_pEventManager->postEvent(SHyprIPCEvent{"monitorremoved", m_name});
         g_pEventManager->postEvent(SHyprIPCEvent{"monitorremovedv2", std::format("{},{},{}", m_id, m_name, m_shortDescription)});
-        Event::bus()->m_events.monitor.removed.emit(m_self.lock());
+        EMIT_HOOK_EVENT("monitorRemoved", m_self.lock());
         g_pCompositor->scheduleMonitorStateRecheck();
     }};
 
@@ -1035,7 +1035,7 @@ bool CMonitor::applyMonitorRule(SMonitorRule* pMonitorRule, bool force) {
     Log::logger->log(Log::DEBUG, "Monitor {} data dump: res {:X}@{:.2f}Hz, scale {:.2f}, transform {}, pos {:X}, 10b {}", m_name, m_pixelSize, m_refreshRate, m_scale,
                      sc<int>(m_transform), m_position, sc<int>(m_enabled10bit));
 
-    Event::bus()->m_events.monitor.layoutChanged.emit();
+    EMIT_HOOK_EVENT("monitorLayoutChanged", nullptr);
 
     m_events.modeChanged.emit();
 
@@ -1355,7 +1355,7 @@ void CMonitor::changeWorkspace(const PHLWORKSPACE& pWorkspace, bool internal, bo
 
         g_pEventManager->postEvent(SHyprIPCEvent{"workspace", pWorkspace->m_name});
         g_pEventManager->postEvent(SHyprIPCEvent{"workspacev2", std::format("{},{}", pWorkspace->m_id, pWorkspace->m_name)});
-        Event::bus()->m_events.workspace.active.emit(pWorkspace);
+        EMIT_HOOK_EVENT("workspace", pWorkspace);
     }
 
     // set all LSes as not above fullscreen on workspace changes
@@ -2280,7 +2280,7 @@ bool CMonitorState::commit() {
     if (!updateSwapchain())
         return false;
 
-    Event::bus()->m_events.monitor.preCommit.emit(m_owner->m_self.lock());
+    EMIT_HOOK_EVENT("preMonitorCommit", m_owner->m_self.lock());
 
     ensureBufferPresent();
 

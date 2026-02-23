@@ -41,8 +41,7 @@
 #include "../managers/input/trackpad/gestures/FloatGesture.hpp"
 #include "../managers/input/trackpad/gestures/FullscreenGesture.hpp"
 
-#include "../event/EventBus.hpp"
-
+#include "../managers/HookSystemManager.hpp"
 #include "../protocols/types/ContentType.hpp"
 #include <cstddef>
 #include <cstdint>
@@ -1068,7 +1067,7 @@ static void clearHlVersionVars() {
 }
 
 void CConfigManager::reload() {
-    Event::bus()->m_events.config.preReload.emit();
+    EMIT_HOOK_EVENT("preConfigReload", nullptr);
     setDefaultAnimationVars();
     resetHLConfig();
     m_configCurrentPath = getMainConfigPath();
@@ -1464,7 +1463,7 @@ void CConfigManager::postConfigReload(const Hyprlang::CParseResult& result) {
     // update layouts
     Layout::Supplementary::algoMatcher()->updateWorkspaceLayouts();
 
-    Event::bus()->m_events.config.reloaded.emit();
+    EMIT_HOOK_EVENT("configReloaded", nullptr);
     if (g_pEventManager)
         g_pEventManager->postEvent(SHyprIPCEvent{"configreloaded", ""});
 }
@@ -1753,7 +1752,7 @@ void CConfigManager::performMonitorReload() {
 
     m_wantsMonitorReload = false;
 
-    Event::bus()->m_events.monitor.layoutChanged.emit();
+    EMIT_HOOK_EVENT("monitorLayoutChanged", nullptr);
 }
 
 void* const* CConfigManager::getConfigValuePtr(const std::string& val) {
