@@ -10,6 +10,7 @@
 #include "../Compositor.hpp"
 #include "../helpers/MiscFunctions.hpp"
 #include "../helpers/CursorShapes.hpp"
+#include "../helpers/TransferFunction.hpp"
 #include "../config/ConfigValue.hpp"
 #include "../config/ConfigManager.hpp"
 #include "../managers/PointerManager.hpp"
@@ -19,7 +20,6 @@
 #include "../protocols/core/Compositor.hpp"
 #include "../protocols/ColorManagement.hpp"
 #include "../protocols/types/ColorManagement.hpp"
-#include "../managers/HookSystemManager.hpp"
 #include "../managers/input/InputManager.hpp"
 #include "../managers/eventLoop/EventLoopManager.hpp"
 #include "../managers/CursorManager.hpp"
@@ -27,6 +27,7 @@
 #include "../helpers/env/Env.hpp"
 #include "../helpers/MainLoopExecutor.hpp"
 #include "../i18n/Engine.hpp"
+#include "../event/EventBus.hpp"
 #include "debug/HyprNotificationOverlay.hpp"
 #include "hyprerror/HyprError.hpp"
 #include "pass/TexPassElement.hpp"
@@ -391,7 +392,7 @@ CHyprOpenGLImpl::CHyprOpenGLImpl() : m_drmFD(g_pCompositor->m_drmRenderNode.fd >
 
     initAssets();
 
-    static auto P = g_pHookSystem->hookDynamic("preRender", [&](void* self, SCallbackInfo& info, std::any data) { preRender(std::any_cast<PHLMONITOR>(data)); });
+    static auto P = Event::bus()->m_events.render.pre.listen([&](PHLMONITOR mon) { preRender(mon); });
 
     RASSERT(eglMakeCurrent(m_eglDisplay, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT), "Couldn't unset current EGL!");
 
@@ -422,23 +423,19 @@ CHyprOpenGLImpl::CHyprOpenGLImpl() : m_drmFD(g_pCompositor->m_drmRenderNode.fd >
 #endif
     };
 
-    static auto P2 = g_pHookSystem->hookDynamic("mouseButton", [](void* self, SCallbackInfo& info, std::any e) {
-        auto E = std::any_cast<IPointer::SButtonEvent>(e);
-
-        if (E.state != WL_POINTER_BUTTON_STATE_PRESSED)
+    static auto P2 = Event::bus()->m_events.input.mouse.button.listen([](IPointer::SButtonEvent e, Event::SCallbackInfo&) {
+        if (e.state != WL_POINTER_BUTTON_STATE_PRESSED)
             return;
 
         addLastPressToHistory(g_pInputManager->getMouseCoordsInternal(), g_pInputManager->getClickMode() == CLICKMODE_KILL, false);
     });
 
-    static auto P3 = g_pHookSystem->hookDynamic("touchDown", [](void* self, SCallbackInfo& info, std::any e) {
-        auto E = std::any_cast<ITouch::SDownEvent>(e);
-
-        auto PMONITOR = g_pCompositor->getMonitorFromName(!E.device->m_boundOutput.empty() ? E.device->m_boundOutput : "");
+    static auto P3 = Event::bus()->m_events.input.touch.down.listen([](ITouch::SDownEvent e, Event::SCallbackInfo&) {
+        auto PMONITOR = g_pCompositor->getMonitorFromName(!e.device->m_boundOutput.empty() ? e.device->m_boundOutput : "");
 
         PMONITOR = PMONITOR ? PMONITOR : Desktop::focusState()->monitor();
 
-        const auto TOUCH_COORDS = PMONITOR->m_position + (E.pos * PMONITOR->m_size);
+        const auto TOUCH_COORDS = PMONITOR->m_position + (e.pos * PMONITOR->m_size);
 
         addLastPressToHistory(TOUCH_COORDS, g_pInputManager->getClickMode() == CLICKMODE_KILL, true);
     });
@@ -685,6 +682,7 @@ void CHyprOpenGLImpl::beginSimple(PHLMONITOR pMonitor, const CRegion& damage, SP
     if (!m_shadersInitialized)
         initShaders();
 
+    m_renderData.transformDamage = true;
     m_renderData.damage.set(damage);
     m_renderData.finalDamage.set(damage);
 
@@ -752,6 +750,7 @@ void CHyprOpenGLImpl::begin(PHLMONITOR pMonitor, const CRegion& damage_, CFrameb
     if (m_renderData.pCurrentMonData->monitorMirrorFB.isAllocated() && m_renderData.pMonitor->m_mirrors.empty())
         m_renderData.pCurrentMonData->monitorMirrorFB.release();
 
+    m_renderData.transformDamage = true;
     m_renderData.damage.set(damage_);
     m_renderData.finalDamage.set(finalDamage.value_or(damage_));
 
@@ -1059,7 +1058,7 @@ void CHyprOpenGLImpl::clear(const CHyprColor& color) {
 
     if (!m_renderData.damage.empty()) {
         m_renderData.damage.forEachRect([this](const auto& RECT) {
-            scissor(&RECT);
+            scissor(&RECT, m_renderData.transformDamage);
             glClear(GL_COLOR_BUFFER_BIT);
         });
     }
@@ -1194,13 +1193,13 @@ void CHyprOpenGLImpl::renderRectWithDamageInternal(const CBox& box, const CHyprC
 
         if (!damageClip.empty()) {
             damageClip.forEachRect([this](const auto& RECT) {
-                scissor(&RECT);
+                scissor(&RECT, m_renderData.transformDamage);
                 glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
             });
         }
     } else {
         data.damage->forEachRect([this](const auto& RECT) {
-            scissor(&RECT);
+            scissor(&RECT, m_renderData.transformDamage);
             glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
         });
     }
@@ -1247,13 +1246,20 @@ static bool isHDR2SDR(const NColorManagement::SImageDescription& imageDescriptio
 
 void CHyprOpenGLImpl::passCMUniforms(WP<CShader> shader, const NColorManagement::PImageDescription imageDescription,
                                      const NColorManagement::PImageDescription targetImageDescription, bool modifySDR, float sdrMinLuminance, int sdrMaxLuminance) {
-    static auto PSDREOTF = CConfigValue<Hyprlang::INT>("render:cm_sdr_eotf");
+    const auto sdrEOTF = NTransferFunction::fromConfig();
 
-    if (m_renderData.surface.valid() &&
-        ((!m_renderData.surface->m_colorManagement.valid() && *PSDREOTF >= 1) ||
-         (*PSDREOTF == 2 && m_renderData.surface->m_colorManagement.valid() &&
-          imageDescription->value().transferFunction == NColorManagement::eTransferFunction::CM_TRANSFER_FUNCTION_SRGB))) {
-        shader->setUniformInt(SHADER_SOURCE_TF, NColorManagement::eTransferFunction::CM_TRANSFER_FUNCTION_GAMMA22);
+    if (m_renderData.surface.valid()) {
+        if (m_renderData.surface->m_colorManagement.valid()) {
+            if (sdrEOTF == NTransferFunction::TF_FORCED_GAMMA22 && imageDescription->value().transferFunction == NColorManagement::eTransferFunction::CM_TRANSFER_FUNCTION_SRGB)
+                shader->setUniformInt(SHADER_SOURCE_TF, NColorManagement::eTransferFunction::CM_TRANSFER_FUNCTION_GAMMA22);
+            else
+                shader->setUniformInt(SHADER_SOURCE_TF, imageDescription->value().transferFunction);
+        } else if (sdrEOTF == NTransferFunction::TF_SRGB)
+            shader->setUniformInt(SHADER_SOURCE_TF, NColorManagement::eTransferFunction::CM_TRANSFER_FUNCTION_SRGB);
+        else if (sdrEOTF == NTransferFunction::TF_GAMMA22 || sdrEOTF == NTransferFunction::TF_FORCED_GAMMA22)
+            shader->setUniformInt(SHADER_SOURCE_TF, NColorManagement::eTransferFunction::CM_TRANSFER_FUNCTION_GAMMA22);
+        else
+            shader->setUniformInt(SHADER_SOURCE_TF, imageDescription->value().transferFunction);
     } else
         shader->setUniformInt(SHADER_SOURCE_TF, imageDescription->value().transferFunction);
 
@@ -1379,16 +1385,16 @@ void CHyprOpenGLImpl::renderTextureInternal(SP<CTexture> tex, const CBox& box, c
         tex->setTexParameter(GL_TEXTURE_MIN_FILTER, tex->minFilter);
     }
 
-    const bool  isHDRSurface      = m_renderData.surface.valid() && m_renderData.surface->m_colorManagement.valid() ? m_renderData.surface->m_colorManagement->isHDR() : false;
-    const bool  canPassHDRSurface = isHDRSurface && !m_renderData.surface->m_colorManagement->isWindowsScRGB(); // windows scRGB requires CM shader
+    const bool isHDRSurface      = m_renderData.surface.valid() && m_renderData.surface->m_colorManagement.valid() ? m_renderData.surface->m_colorManagement->isHDR() : false;
+    const bool canPassHDRSurface = isHDRSurface && !m_renderData.surface->m_colorManagement->isWindowsScRGB(); // windows scRGB requires CM shader
 
-    const auto  imageDescription = m_renderData.surface.valid() && m_renderData.surface->m_colorManagement.valid() ?
-         CImageDescription::from(m_renderData.surface->m_colorManagement->imageDescription()) :
-         (data.cmBackToSRGB ? data.cmBackToSRGBSource->m_imageDescription : DEFAULT_IMAGE_DESCRIPTION);
+    const auto imageDescription = m_renderData.surface.valid() && m_renderData.surface->m_colorManagement.valid() ?
+        CImageDescription::from(m_renderData.surface->m_colorManagement->imageDescription()) :
+        (data.cmBackToSRGB ? data.cmBackToSRGBSource->m_imageDescription : DEFAULT_IMAGE_DESCRIPTION);
 
-    static auto PSDREOTF      = CConfigValue<Hyprlang::INT>("render:cm_sdr_eotf");
-    auto        chosenSdrEotf = *PSDREOTF != 3 ? NColorManagement::CM_TRANSFER_FUNCTION_GAMMA22 : NColorManagement::CM_TRANSFER_FUNCTION_SRGB;
-    const auto  targetImageDescription =
+    const auto sdrEOTF       = NTransferFunction::fromConfig();
+    auto       chosenSdrEotf = sdrEOTF != NTransferFunction::TF_SRGB ? NColorManagement::CM_TRANSFER_FUNCTION_GAMMA22 : NColorManagement::CM_TRANSFER_FUNCTION_SRGB;
+    const auto targetImageDescription =
         data.cmBackToSRGB ? CImageDescription::from(NColorManagement::SImageDescription{.transferFunction = chosenSdrEotf}) : m_renderData.pMonitor->m_imageDescription;
 
     const bool skipCM = !*PENABLECM || !m_cmSupported                                     /* CM unsupported or disabled */
@@ -1588,13 +1594,13 @@ void CHyprOpenGLImpl::renderTextureInternal(SP<CTexture> tex, const CBox& box, c
 
         if (!damageClip.empty()) {
             damageClip.forEachRect([this](const auto& RECT) {
-                scissor(&RECT);
+                scissor(&RECT, m_renderData.transformDamage);
                 glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
             });
         }
     } else {
         data.damage->forEachRect([this](const auto& RECT) {
-            scissor(&RECT);
+            scissor(&RECT, m_renderData.transformDamage);
             glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
         });
     }
@@ -1640,7 +1646,7 @@ void CHyprOpenGLImpl::renderTexturePrimitive(SP<CTexture> tex, const CBox& box) 
     glBindVertexArray(shader->getUniformLocation(SHADER_SHADER_VAO));
 
     m_renderData.damage.forEachRect([this](const auto& RECT) {
-        scissor(&RECT);
+        scissor(&RECT, m_renderData.transformDamage);
         glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
     });
 
@@ -1681,7 +1687,7 @@ void CHyprOpenGLImpl::renderTextureMatte(SP<CTexture> tex, const CBox& box, CFra
     glBindVertexArray(shader->getUniformLocation(SHADER_SHADER_VAO));
 
     m_renderData.damage.forEachRect([this](const auto& RECT) {
-        scissor(&RECT);
+        scissor(&RECT, m_renderData.transformDamage);
         glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
     });
 
@@ -2275,7 +2281,7 @@ void CHyprOpenGLImpl::renderBorder(const CBox& box, const CGradientValueData& gr
 
     if (!borderRegion.empty()) {
         borderRegion.forEachRect([this](const auto& RECT) {
-            scissor(&RECT);
+            scissor(&RECT, m_renderData.transformDamage);
             glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
         });
     }
@@ -2364,7 +2370,7 @@ void CHyprOpenGLImpl::renderBorder(const CBox& box, const CGradientValueData& gr
 
     if (!borderRegion.empty()) {
         borderRegion.forEachRect([this](const auto& RECT) {
-            scissor(&RECT);
+            scissor(&RECT, m_renderData.transformDamage);
             glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
         });
     }
@@ -2427,13 +2433,13 @@ void CHyprOpenGLImpl::renderRoundedShadow(const CBox& box, int round, float roun
 
         if (!damageClip.empty()) {
             damageClip.forEachRect([this](const auto& RECT) {
-                scissor(&RECT);
+                scissor(&RECT, m_renderData.transformDamage);
                 glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
             });
         }
     } else {
         m_renderData.damage.forEachRect([this](const auto& RECT) {
-            scissor(&RECT);
+            scissor(&RECT, m_renderData.transformDamage);
             glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
         });
     }
@@ -3063,18 +3069,30 @@ void CHyprOpenGLImpl::setCapStatus(int cap, bool status) {
     }
 }
 
-uint32_t CHyprOpenGLImpl::getPreferredReadFormat(PHLMONITOR pMonitor) {
+DRMFormat CHyprOpenGLImpl::getPreferredReadFormat(PHLMONITOR pMonitor) {
     static const auto PFORCE8BIT = CConfigValue<Hyprlang::INT>("misc:screencopy_force_8b");
 
-    if (!*PFORCE8BIT)
-        return pMonitor->m_output->state->state().drmFormat;
+    auto              monFmt = pMonitor->m_output->state->state().drmFormat;
 
-    auto fmt = pMonitor->m_output->state->state().drmFormat;
+    if (*PFORCE8BIT)
+        if (monFmt == DRM_FORMAT_BGRA1010102 || monFmt == DRM_FORMAT_ARGB2101010 || monFmt == DRM_FORMAT_XRGB2101010 || monFmt == DRM_FORMAT_BGRX1010102 ||
+            monFmt == DRM_FORMAT_XBGR2101010)
+            monFmt = DRM_FORMAT_XRGB8888;
 
-    if (fmt == DRM_FORMAT_BGRA1010102 || fmt == DRM_FORMAT_ARGB2101010 || fmt == DRM_FORMAT_XRGB2101010 || fmt == DRM_FORMAT_BGRX1010102 || fmt == DRM_FORMAT_XBGR2101010)
-        return DRM_FORMAT_XRGB8888;
+    return monFmt;
+}
 
-    return fmt;
+std::vector<uint64_t> CHyprOpenGLImpl::getDRMFormatModifiers(DRMFormat drmFormat) {
+    SDRMFormat format;
+
+    for (const auto& fmt : m_drmFormats) {
+        if (fmt.drmFormat == drmFormat) {
+            format = fmt;
+            break;
+        }
+    }
+
+    return format.modifiers;
 }
 
 bool CHyprOpenGLImpl::explicitSyncSupported() {

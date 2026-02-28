@@ -11,13 +11,13 @@
 #include "eventLoop/EventLoopManager.hpp"
 #include "../render/pass/TexPassElement.hpp"
 #include "../managers/input/InputManager.hpp"
-#include "../managers/HookSystemManager.hpp"
 #include "../render/Renderer.hpp"
 #include "../render/OpenGL.hpp"
 #include "../desktop/state/FocusState.hpp"
 #include "SeatManager.hpp"
 #include "../helpers/time/Time.hpp"
 #include "../helpers/Drm.hpp"
+#include "../event/EventBus.hpp"
 #include <cstring>
 #include <gbm.h>
 #include <cairo/cairo.h>
@@ -26,21 +26,19 @@
 using namespace Hyprutils::Utils;
 
 CPointerManager::CPointerManager() {
-    m_hooks.monitorAdded = g_pHookSystem->hookDynamic("monitorAdded", [this](void* self, SCallbackInfo& info, std::any data) {
-        auto PMONITOR = std::any_cast<PHLMONITOR>(data);
-
+    m_hooks.monitorAdded = Event::bus()->m_events.monitor.added.listen([this](PHLMONITOR monitor) {
         onMonitorLayoutChange();
 
-        PMONITOR->m_events.modeChanged.listenStatic([this] { g_pEventLoopManager->doLater([this]() { onMonitorLayoutChange(); }); });
-        PMONITOR->m_events.disconnect.listenStatic([this] { g_pEventLoopManager->doLater([this]() { onMonitorLayoutChange(); }); });
-        PMONITOR->m_events.destroy.listenStatic([this] {
+        monitor->m_events.modeChanged.listenStatic([this] { g_pEventLoopManager->doLater([this]() { onMonitorLayoutChange(); }); });
+        monitor->m_events.disconnect.listenStatic([this] { g_pEventLoopManager->doLater([this]() { onMonitorLayoutChange(); }); });
+        monitor->m_events.destroy.listenStatic([this] {
             if (g_pCompositor && !g_pCompositor->m_isShuttingDown)
                 std::erase_if(m_monitorStates, [](const auto& other) { return other->monitor.expired(); });
         });
     });
 
-    m_hooks.monitorPreRender = g_pHookSystem->hookDynamic("preMonitorCommit", [this](void* self, SCallbackInfo& info, std::any data) {
-        auto state = stateFor(std::any_cast<PHLMONITOR>(data));
+    m_hooks.monitorPreRender = Event::bus()->m_events.monitor.preCommit.listen([this](PHLMONITOR monitor) {
+        auto state = stateFor(monitor);
         if (!state)
             return;
 
@@ -96,6 +94,10 @@ Vector2D CPointerManager::position() {
     return m_pointerPos;
 }
 
+Vector2D CPointerManager::hotspot() {
+    return m_currentCursorImage.hotspot;
+}
+
 bool CPointerManager::hasCursor() {
     return m_currentCursorImage.pBuffer || m_currentCursorImage.surface;
 }
@@ -115,6 +117,7 @@ void CPointerManager::setCursorBuffer(SP<Aquamarine::IBuffer> buf, const Vector2
             m_currentCursorImage.scale   = scale;
             updateCursorBackend();
             damageIfSoftware();
+            m_events.cursorChanged.emit();
         }
 
         return;
@@ -132,6 +135,7 @@ void CPointerManager::setCursorBuffer(SP<Aquamarine::IBuffer> buf, const Vector2
 
     updateCursorBackend();
     damageIfSoftware();
+    m_events.cursorChanged.emit();
 }
 
 void CPointerManager::setCursorSurface(SP<Desktop::View::CWLSurface> surf, const Vector2D& hotspot) {
@@ -143,6 +147,7 @@ void CPointerManager::setCursorSurface(SP<Desktop::View::CWLSurface> surf, const
             m_currentCursorImage.scale   = surf && surf->resource() ? surf->resource()->m_current.scale : 1.F;
             updateCursorBackend();
             damageIfSoftware();
+            m_events.cursorChanged.emit();
         }
 
         return;
@@ -164,6 +169,7 @@ void CPointerManager::setCursorSurface(SP<Desktop::View::CWLSurface> surf, const
             recheckEnteredOutputs();
             updateCursorBackend();
             damageIfSoftware();
+            m_events.cursorChanged.emit();
         });
 
         if (surf->resource()->m_current.texture) {
@@ -177,6 +183,7 @@ void CPointerManager::setCursorSurface(SP<Desktop::View::CWLSurface> surf, const
     recheckEnteredOutputs();
     updateCursorBackend();
     damageIfSoftware();
+    m_events.cursorChanged.emit();
 }
 
 void CPointerManager::recheckEnteredOutputs() {
@@ -261,6 +268,8 @@ void CPointerManager::resetCursorImage(bool apply) {
             ms->cursorFrontBuffer = nullptr;
         }
     }
+
+    m_events.cursorChanged.emit();
 }
 
 void CPointerManager::updateCursorBackend() {
@@ -398,27 +407,23 @@ bool CPointerManager::setHWCursorBuffer(SP<SMonitorPointerState> state, SP<Aquam
 }
 
 SP<Aquamarine::IBuffer> CPointerManager::renderHWCursorBuffer(SP<CPointerManager::SMonitorPointerState> state, SP<CTexture> texture) {
-    auto maxSize = state->monitor->m_output->cursorPlaneSize();
+    auto        maxSize    = state->monitor->m_output->cursorPlaneSize();
+    auto const& cursorSize = m_currentCursorImage.size;
+
+    static auto PCPUBUFFER = CConfigValue<Hyprlang::INT>("cursor:use_cpu_buffer");
+
+    const bool  shouldUseCpuBuffer = *PCPUBUFFER == 1 || (*PCPUBUFFER != 0 && g_pHyprRenderer->isNvidia());
 
     if (maxSize == Vector2D{})
         return nullptr;
-    else if (maxSize == Vector2D{-1, -1}) {
-        Log::logger->log(Log::TRACE, "cursor plane size is unlimited, falling back to 256x256");
-        maxSize = Vector2D{256, 256};
-    }
 
-    auto const  damage     = maxSize;
-    auto const& cursorSize = m_currentCursorImage.size;
-
-    static auto PCPUBUFFER         = CConfigValue<Hyprlang::INT>("cursor:use_cpu_buffer");
-    const bool  shouldUseCpuBuffer = *PCPUBUFFER == 1 || (*PCPUBUFFER != 0 && g_pHyprRenderer->isNvidia());
-
-    if (cursorSize.x > maxSize.x || cursorSize.y > maxSize.y) {
-        Log::logger->log(Log::TRACE, "hardware cursor too big! {} > {}", m_currentCursorImage.size, maxSize);
-        return nullptr;
-    }
-
-    maxSize = cursorSize;
+    if (maxSize != Vector2D{-1, -1}) {
+        if (cursorSize.x > maxSize.x || cursorSize.y > maxSize.y) {
+            Log::logger->log(Log::TRACE, "hardware cursor too big! {} > {}", m_currentCursorImage.size, maxSize);
+            return nullptr;
+        }
+    } else
+        maxSize = cursorSize;
 
     if (!state->monitor->m_cursorSwapchain || maxSize != state->monitor->m_cursorSwapchain->currentOptions().size ||
         shouldUseCpuBuffer != (state->monitor->m_cursorSwapchain->getAllocator()->type() != Aquamarine::AQ_ALLOCATOR_TYPE_GBM)) {
@@ -584,7 +589,8 @@ SP<Aquamarine::IBuffer> CPointerManager::renderHWCursorBuffer(SP<CPointerManager
 
     RBO->bind();
 
-    g_pHyprOpenGL->beginSimple(state->monitor.lock(), {0, 0, damage.x, damage.y}, RBO);
+    const auto& damageSize = state->monitor->m_output->cursorPlaneSize();
+    g_pHyprOpenGL->beginSimple(state->monitor.lock(), {0, 0, damageSize.x, damageSize.y}, RBO);
     g_pHyprOpenGL->clear(CHyprColor{0.F, 0.F, 0.F, 0.F}); // ensure the RBO is zero initialized.
 
     CBox xbox = {{}, Vector2D{m_currentCursorImage.size / m_currentCursorImage.scale * state->monitor->m_scale}.round()};
@@ -889,6 +895,10 @@ void CPointerManager::onMonitorLayoutChange() {
     recheckEnteredOutputs();
 
     damageIfSoftware();
+}
+
+const CPointerManager::SCursorImage& CPointerManager::currentCursorImage() {
+    return m_currentCursorImage;
 }
 
 SP<CTexture> CPointerManager::getCurrentCursorTexture() {

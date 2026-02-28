@@ -50,6 +50,8 @@
 #include "../protocols/SecurityContext.hpp"
 #include "../protocols/CTMControl.hpp"
 #include "../protocols/HyprlandSurface.hpp"
+#include "../protocols/ImageCaptureSource.hpp"
+#include "../protocols/ImageCopyCapture.hpp"
 #include "../protocols/core/Seat.hpp"
 #include "../protocols/core/DataDevice.hpp"
 #include "../protocols/core/Compositor.hpp"
@@ -67,6 +69,7 @@
 #include "../protocols/CommitTiming.hpp"
 
 #include "../helpers/Monitor.hpp"
+#include "../event/EventBus.hpp"
 #include "../render/Renderer.hpp"
 #include "../Compositor.hpp"
 #include "content-type-v1.hpp"
@@ -110,9 +113,7 @@ CProtocolManager::CProtocolManager() {
     static const auto PENABLECT = CConfigValue<Hyprlang::INT>("render:commit_timing_enabled");
 
     // Outputs are a bit dumb, we have to agree.
-    static auto P = g_pHookSystem->hookDynamic("monitorAdded", [this](void* self, SCallbackInfo& info, std::any param) {
-        auto M = std::any_cast<PHLMONITOR>(param);
-
+    static auto P = Event::bus()->m_events.monitor.added.listen([this](PHLMONITOR M) {
         // ignore mirrored outputs. I don't think this will ever be hit as mirrors are applied after
         // this event is emitted iirc.
         // also ignore the fallback
@@ -129,8 +130,7 @@ CProtocolManager::CProtocolManager() {
         m_modeChangeListeners[M->m_name] = M->m_events.modeChanged.listen([this, M] { onMonitorModeChange(M); });
     });
 
-    static auto P2 = g_pHookSystem->hookDynamic("monitorRemoved", [this](void* self, SCallbackInfo& info, std::any param) {
-        auto M = std::any_cast<PHLMONITOR>(param);
+    static auto P2 = Event::bus()->m_events.monitor.removed.listen([this](PHLMONITOR M) {
         if (!PROTO::outputs.contains(M->m_name))
             return;
         PROTO::outputs.at(M->m_name)->remove();
@@ -180,8 +180,6 @@ CProtocolManager::CProtocolManager() {
     PROTO::dataWlr             = makeUnique<CDataDeviceWLRProtocol>(&zwlr_data_control_manager_v1_interface, 2, "DataDeviceWlr");
     PROTO::primarySelection    = makeUnique<CPrimarySelectionProtocol>(&zwp_primary_selection_device_manager_v1_interface, 1, "PrimarySelection");
     PROTO::xwaylandShell       = makeUnique<CXWaylandShellProtocol>(&xwayland_shell_v1_interface, 1, "XWaylandShell");
-    PROTO::screencopy          = makeUnique<CScreencopyProtocol>(&zwlr_screencopy_manager_v1_interface, 3, "Screencopy");
-    PROTO::toplevelExport      = makeUnique<CToplevelExportProtocol>(&hyprland_toplevel_export_manager_v1_interface, 2, "ToplevelExport");
     PROTO::toplevelMapping     = makeUnique<CToplevelMappingProtocol>(&hyprland_toplevel_mapping_manager_v1_interface, 1, "ToplevelMapping");
     PROTO::globalShortcuts     = makeUnique<CGlobalShortcutsProtocol>(&hyprland_global_shortcuts_manager_v1_interface, 1, "GlobalShortcuts");
     PROTO::xdgDialog           = makeUnique<CXDGDialogProtocol>(&xdg_wm_dialog_v1_interface, 1, "XDGDialog");
@@ -199,6 +197,12 @@ CProtocolManager::CProtocolManager() {
 
     if (*PENABLECT)
         PROTO::commitTiming = makeUnique<CCommitTimingProtocol>(&wp_commit_timing_manager_v1_interface, 1, "CommitTiming");
+
+    // Screensharing Protocols
+    PROTO::screencopy         = makeUnique<CScreencopyProtocol>(&zwlr_screencopy_manager_v1_interface, 3, "Screencopy");
+    PROTO::toplevelExport     = makeUnique<CToplevelExportProtocol>(&hyprland_toplevel_export_manager_v1_interface, 2, "ToplevelExport");
+    PROTO::imageCaptureSource = makeUnique<CImageCaptureSourceProtocol>(); // ctor inits actual protos, output and toplevel
+    PROTO::imageCopyCapture   = makeUnique<CImageCopyCaptureProtocol>(&ext_image_copy_capture_manager_v1_interface, 1, "ImageCopyCapture");
 
     if (*PENABLECM)
         PROTO::colorManagement = makeUnique<CColorManagementProtocol>(&wp_color_manager_v1_interface, 1, "ColorManagement", *PDEBUGCM);
@@ -298,6 +302,7 @@ CProtocolManager::~CProtocolManager() {
     PROTO::pointerWarp.reset();
     PROTO::fifo.reset();
     PROTO::commitTiming.reset();
+    PROTO::imageCaptureSource.reset();
 
     for (auto& [_, lease] : PROTO::lease) {
         lease.reset();

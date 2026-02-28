@@ -7,6 +7,7 @@
 #include "../desktop/view/WLSurface.hpp"
 #include "../helpers/sync/SyncTimeline.hpp"
 #include "../helpers/time/Time.hpp"
+#include "../helpers/signal/Signal.hpp"
 #include <tuple>
 
 class CMonitor;
@@ -60,9 +61,33 @@ class CPointerManager {
 
     //
     Vector2D position();
+    Vector2D hotspot();
     Vector2D cursorSizeLogical();
 
     void     recheckEnteredOutputs();
+
+    // returns the thing in global coords
+    CBox getCursorBoxGlobal();
+
+    struct SCursorImage {
+        SP<Aquamarine::IBuffer>       pBuffer;
+        SP<CTexture>                  bufferTex;
+        WP<Desktop::View::CWLSurface> surface;
+
+        Vector2D                      hotspot;
+        Vector2D                      size;
+        float                         scale = 1.F;
+
+        CHyprSignalListener           destroySurface;
+        CHyprSignalListener           commitSurface;
+    };
+
+    const SCursorImage& currentCursorImage();
+    SP<CTexture>        getCurrentCursorTexture();
+
+    struct {
+        CSignalT<> cursorChanged;
+    } m_events;
 
   private:
     void recheckPointerPosition();
@@ -79,13 +104,9 @@ class CPointerManager {
     // returns the thing in device coordinates. Is NOT offset by the hotspot, relies on set_cursor with hotspot.
     Vector2D getCursorPosForMonitor(PHLMONITOR pMonitor);
     // returns the thing in logical coordinates of the monitor
-    CBox getCursorBoxLogicalForMonitor(PHLMONITOR pMonitor);
-    // returns the thing in global coords
-    CBox         getCursorBoxGlobal();
+    CBox     getCursorBoxLogicalForMonitor(PHLMONITOR pMonitor);
 
-    Vector2D     transformedHotspot(PHLMONITOR pMonitor);
-
-    SP<CTexture> getCurrentCursorTexture();
+    Vector2D transformedHotspot(PHLMONITOR pMonitor);
 
     struct SPointerListener {
         CHyprSignalListener destroy;
@@ -137,20 +158,9 @@ class CPointerManager {
         std::vector<CBox> monitorBoxes;
     } m_currentMonitorLayout;
 
-    struct {
-        SP<Aquamarine::IBuffer>       pBuffer;
-        SP<CTexture>                  bufferTex;
-        WP<Desktop::View::CWLSurface> surface;
+    SCursorImage m_currentCursorImage; // TODO: support various sizes per-output so we can have pixel-perfect cursors
 
-        Vector2D                      hotspot;
-        Vector2D                      size;
-        float                         scale = 1.F;
-
-        CHyprSignalListener           destroySurface;
-        CHyprSignalListener           commitSurface;
-    } m_currentCursorImage; // TODO: support various sizes per-output so we can have pixel-perfect cursors
-
-    Vector2D m_pointerPos = {0, 0};
+    Vector2D     m_pointerPos = {0, 0};
 
     struct SMonitorPointerState {
         SMonitorPointerState(const PHLMONITOR& m) : monitor(m) {}
@@ -175,8 +185,8 @@ class CPointerManager {
     bool                                  setHWCursorBuffer(SP<SMonitorPointerState> state, SP<Aquamarine::IBuffer> buf);
 
     struct {
-        SP<HOOK_CALLBACK_FN> monitorAdded;
-        SP<HOOK_CALLBACK_FN> monitorPreRender;
+        CHyprSignalListener monitorAdded;
+        CHyprSignalListener monitorPreRender;
     } m_hooks;
 };
 

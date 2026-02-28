@@ -1,9 +1,9 @@
 #pragma once
 
 #include "../../TiledAlgorithm.hpp"
-#include "../../../../managers/HookSystemManager.hpp"
 #include "../../../../helpers/math/Direction.hpp"
 #include "ScrollTapeController.hpp"
+#include "../../../../helpers/signal/Signal.hpp"
 
 #include <vector>
 
@@ -77,7 +77,7 @@ namespace Layout::Tiled {
         SP<SColumnData>              prev(SP<SColumnData> c);
         SP<SColumnData>              atCenter();
 
-        bool                         visible(SP<SColumnData> c);
+        bool                         visible(SP<SColumnData> c, bool full = false);
         void                         centerCol(SP<SColumnData> c);
         void                         fitCol(SP<SColumnData> c);
         void                         centerOrFitCol(SP<SColumnData> c);
@@ -111,12 +111,18 @@ namespace Layout::Tiled {
 
         CBox                                     usableArea();
 
-      private:
-        SP<SScrollingData>   m_scrollingData;
+        enum eInputMode : uint8_t {
+            INPUT_MODE_SOFT = 0,
+            INPUT_MODE_CLICK,
+            INPUT_MODE_KB
+        };
 
-        SP<HOOK_CALLBACK_FN> m_configCallback;
-        SP<HOOK_CALLBACK_FN> m_focusCallback;
-        SP<HOOK_CALLBACK_FN> m_mouseButtonCallback;
+      private:
+        SP<SScrollingData>  m_scrollingData;
+
+        CHyprSignalListener m_configCallback;
+        CHyprSignalListener m_focusCallback;
+        CHyprSignalListener m_mouseButtonCallback;
 
         struct {
             std::vector<float> configuredWidths;
@@ -130,7 +136,7 @@ namespace Layout::Tiled {
 
         void                     focusTargetUpdate(SP<ITarget> target);
         void                     moveTargetTo(SP<ITarget> t, Math::eDirection dir, bool silent);
-        void                     focusOnInput(SP<ITarget> target, bool hardInput);
+        void                     focusOnInput(SP<ITarget> target, eInputMode input);
 
         friend struct SScrollingData;
     };

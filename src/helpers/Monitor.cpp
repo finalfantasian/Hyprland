@@ -2,6 +2,7 @@
 #include "MiscFunctions.hpp"
 #include "../macros.hpp"
 #include "SharedDefs.hpp"
+#include "../helpers/TransferFunction.hpp"
 #include "math/Math.hpp"
 #include "../protocols/ColorManagement.hpp"
 #include "../Compositor.hpp"
@@ -22,16 +23,19 @@
 #include "../protocols/core/DataDevice.hpp"
 #include "../render/Renderer.hpp"
 #include "../managers/EventManager.hpp"
+#include "../managers/screenshare/ScreenshareManager.hpp"
 #include "../managers/animation/AnimationManager.hpp"
 #include "../managers/animation/DesktopAnimationManager.hpp"
 #include "../managers/input/InputManager.hpp"
 #include "../hyprerror/HyprError.hpp"
 #include "../layout/LayoutManager.hpp"
 #include "../i18n/Engine.hpp"
+#include "../protocols/types/ColorManagement.hpp"
 #include "sync/SyncTimeline.hpp"
 #include "time/Time.hpp"
 #include "../desktop/view/LayerSurface.hpp"
 #include "../desktop/state/FocusState.hpp"
+#include "../event/EventBus.hpp"
 #include "Drm.hpp"
 #include <aquamarine/output/Output.hpp>
 #include "debug/log/Logger.hpp"
@@ -72,7 +76,7 @@ CMonitor::~CMonitor() {
 }
 
 void CMonitor::onConnect(bool noRule) {
-    EMIT_HOOK_EVENT("preMonitorAdded", m_self.lock());
+    Event::bus()->m_events.monitor.preAdded.emit(m_self.lock());
     CScopeGuard x = {[]() { g_pCompositor->arrangeMonitors(); }};
 
     m_zoomAnimProgress->setValueAndWarp(0.F);
@@ -85,10 +89,11 @@ void CMonitor::onConnect(bool noRule) {
             m_frameScheduler->onFrame();
     });
     m_listeners.commit     = m_output->events.commit.listen([this] {
-        if (true) { // FIXME: E->state->committed & WLR_OUTPUT_STATE_BUFFER
-            PROTO::screencopy->onOutputCommit(m_self.lock());
-            PROTO::toplevelExport->onOutputCommit(m_self.lock());
-        }
+        m_events.commit.emit();
+
+        // FIXME: E->state->committed & WLR_OUTPUT_STATE_BUFFER
+        if (true && Screenshare::mgr())
+            Screenshare::mgr()->onOutputCommit(m_self.lock());
     });
     m_listeners.needsFrame = m_output->events.needsFrame.listen([this] { g_pCompositor->scheduleFrameForMonitor(m_self.lock(), Aquamarine::IOutput::AQ_SCHEDULE_NEEDS_FRAME); });
 
@@ -344,17 +349,17 @@ void CMonitor::onConnect(bool noRule) {
 
     g_pEventManager->postEvent(SHyprIPCEvent{"monitoradded", m_name});
     g_pEventManager->postEvent(SHyprIPCEvent{"monitoraddedv2", std::format("{},{},{}", m_id, m_name, m_shortDescription)});
-    EMIT_HOOK_EVENT("monitorAdded", m_self.lock());
+    Event::bus()->m_events.monitor.added.emit(m_self.lock());
 }
 
 void CMonitor::onDisconnect(bool destroy) {
-    EMIT_HOOK_EVENT("preMonitorRemoved", m_self.lock());
+    Event::bus()->m_events.monitor.preRemoved.emit(m_self.lock());
     CScopeGuard x = {[this]() {
         if (g_pCompositor->m_isShuttingDown)
             return;
         g_pEventManager->postEvent(SHyprIPCEvent{"monitorremoved", m_name});
         g_pEventManager->postEvent(SHyprIPCEvent{"monitorremovedv2", std::format("{},{},{}", m_id, m_name, m_shortDescription)});
-        EMIT_HOOK_EVENT("monitorRemoved", m_self.lock());
+        Event::bus()->m_events.monitor.removed.emit(m_self.lock());
         g_pCompositor->scheduleMonitorStateRecheck();
     }};
 
@@ -477,20 +482,41 @@ void CMonitor::onDisconnect(bool destroy) {
     std::erase_if(g_pCompositor->m_monitors, [&](PHLMONITOR& el) { return el.get() == this; });
 }
 
-void CMonitor::applyCMType(NCMType::eCMType cmType, int cmSdrEotf) {
-    auto        oldImageDescription = m_imageDescription;
-    static auto PSDREOTF            = CConfigValue<Hyprlang::INT>("render:cm_sdr_eotf");
-    auto        chosenSdrEotf       = cmSdrEotf == 0 ? (*PSDREOTF != 3 ? NColorManagement::CM_TRANSFER_FUNCTION_GAMMA22 : NColorManagement::CM_TRANSFER_FUNCTION_SRGB) :
-                                                       (cmSdrEotf == 1 ? NColorManagement::CM_TRANSFER_FUNCTION_SRGB : NColorManagement::CM_TRANSFER_FUNCTION_GAMMA22);
+static NColorManagement::eTransferFunction chooseTF(NTransferFunction::eTF tf) {
+    const auto sdrEOTF = NTransferFunction::fromConfig();
 
-    const auto  masteringPrimaries                                                        = getMasteringPrimaries();
+    switch (tf) {
+        case NTransferFunction::TF_DEFAULT:
+        case NTransferFunction::TF_GAMMA22:
+        case NTransferFunction::TF_FORCED_GAMMA22: return NColorManagement::CM_TRANSFER_FUNCTION_GAMMA22;
+        case NTransferFunction::TF_SRGB: return NColorManagement::CM_TRANSFER_FUNCTION_SRGB;
+
+        case NTransferFunction::TF_AUTO: // use global setting
+            switch (sdrEOTF) {
+                case NTransferFunction::TF_AUTO: return NColorManagement::CM_TRANSFER_FUNCTION_GAMMA22;
+                default: return chooseTF(sdrEOTF);
+            }
+
+        default: UNREACHABLE();
+    }
+}
+
+void CMonitor::applyCMType(NCMType::eCMType cmType, NTransferFunction::eTF cmSdrEotf) {
+    auto                                                              oldImageDescription = m_imageDescription;
+    const auto                                                        chosenSdrEotf       = chooseTF(cmSdrEotf);
+
+    const auto                                                        masteringPrimaries  = getMasteringPrimaries();
     const NColorManagement::SImageDescription::SPCMasteringLuminances masteringLuminances = getMasteringLuminances();
 
     const auto                                                        maxFALL = this->maxFALL();
     const auto                                                        maxCLL  = this->maxCLL();
 
     switch (cmType) {
-        case NCMType::CM_SRGB: m_imageDescription = CImageDescription::from({.transferFunction = chosenSdrEotf}); break; // assumes SImageDescription defaults to sRGB
+        case NCMType::CM_SRGB:
+            m_imageDescription = CImageDescription::from({.transferFunction = chosenSdrEotf,
+                                                          .primariesNamed   = NColorManagement::CM_PRIMARIES_SRGB,
+                                                          .primaries        = NColorManagement::getPrimaries(NColorManagement::CM_PRIMARIES_SRGB)});
+            break; // assumes SImageDescription defaults to sRGB
         case NCMType::CM_WIDE:
             m_imageDescription = CImageDescription::from({.transferFunction    = chosenSdrEotf,
                                                           .primariesNameSet    = true,
@@ -1013,7 +1039,7 @@ bool CMonitor::applyMonitorRule(SMonitorRule* pMonitorRule, bool force) {
     Log::logger->log(Log::DEBUG, "Monitor {} data dump: res {:X}@{:.2f}Hz, scale {:.2f}, transform {}, pos {:X}, 10b {}", m_name, m_pixelSize, m_refreshRate, m_scale,
                      sc<int>(m_transform), m_position, sc<int>(m_enabled10bit));
 
-    EMIT_HOOK_EVENT("monitorLayoutChanged", nullptr);
+    Event::bus()->m_events.monitor.layoutChanged.emit();
 
     m_events.modeChanged.emit();
 
@@ -1333,7 +1359,7 @@ void CMonitor::changeWorkspace(const PHLWORKSPACE& pWorkspace, bool internal, bo
 
         g_pEventManager->postEvent(SHyprIPCEvent{"workspace", pWorkspace->m_name});
         g_pEventManager->postEvent(SHyprIPCEvent{"workspacev2", std::format("{},{}", pWorkspace->m_id, pWorkspace->m_name)});
-        EMIT_HOOK_EVENT("workspace", pWorkspace);
+        Event::bus()->m_events.workspace.active.emit(pWorkspace);
     }
 
     // set all LSes as not above fullscreen on workspace changes
@@ -2149,11 +2175,11 @@ bool CMonitor::canNoShaderCM() {
     if (SRC_DESC_VALUE.icc.fd >= 0 || m_imageDescription->value().icc.fd >= 0)
         return false; // no ICC support
 
-    static auto PSDREOTF = CConfigValue<Hyprlang::INT>("render:cm_sdr_eotf");
+    const auto sdrEOTF = NTransferFunction::fromConfig();
     // only primaries differ
     return (
         (SRC_DESC_VALUE.transferFunction == m_imageDescription->value().transferFunction ||
-         (*PSDREOTF == 2 && SRC_DESC_VALUE.transferFunction == NColorManagement::CM_TRANSFER_FUNCTION_SRGB &&
+         (sdrEOTF == NTransferFunction::TF_FORCED_GAMMA22 && SRC_DESC_VALUE.transferFunction == NColorManagement::CM_TRANSFER_FUNCTION_SRGB &&
           m_imageDescription->value().transferFunction == NColorManagement::CM_TRANSFER_FUNCTION_GAMMA22)) &&
         SRC_DESC_VALUE.transferFunctionPower == m_imageDescription->value().transferFunctionPower &&
         (!inHDR() || SRC_DESC_VALUE.luminances == m_imageDescription->value().luminances)
@@ -2193,7 +2219,7 @@ bool CMonitorState::commit() {
     if (!updateSwapchain())
         return false;
 
-    EMIT_HOOK_EVENT("preMonitorCommit", m_owner->m_self.lock());
+    Event::bus()->m_events.monitor.preCommit.emit(m_owner->m_self.lock());
 
     ensureBufferPresent();
 

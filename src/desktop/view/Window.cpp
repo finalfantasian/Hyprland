@@ -39,7 +39,6 @@
 #include "../../helpers/math/Expression.hpp"
 #include "../../managers/XWaylandManager.hpp"
 #include "../../render/Renderer.hpp"
-#include "../../managers/HookSystemManager.hpp"
 #include "../../managers/EventManager.hpp"
 #include "../../managers/input/InputManager.hpp"
 #include "../../managers/PointerManager.hpp"
@@ -48,6 +47,7 @@
 #include "../../layout/LayoutManager.hpp"
 #include "../../layout/target/WindowTarget.hpp"
 #include "../../layout/target/WindowGroupTarget.hpp"
+#include "../../event/EventBus.hpp"
 
 #include <hyprutils/string/String.hpp>
 
@@ -521,7 +521,7 @@ void CWindow::moveToWorkspace(PHLWORKSPACE pWorkspace) {
     if (valid(pWorkspace)) {
         g_pEventManager->postEvent(SHyprIPCEvent{.event = "movewindow", .data = std::format("{:x},{}", rc<uintptr_t>(this), pWorkspace->m_name)});
         g_pEventManager->postEvent(SHyprIPCEvent{.event = "movewindowv2", .data = std::format("{:x},{},{}", rc<uintptr_t>(this), pWorkspace->m_id, pWorkspace->m_name)});
-        EMIT_HOOK_EVENT("moveWindow", (std::vector<std::any>{m_self.lock(), pWorkspace}));
+        Event::bus()->m_events.window.moveToWorkspace.emit(m_self.lock(), pWorkspace);
     }
 
     if (const auto SWALLOWED = m_swallowed.lock()) {
@@ -653,6 +653,18 @@ void CWindow::onMap() {
         },
         false);
 
+    m_realSize->setUpdateCallback([this](auto) {
+        if (m_isMapped)
+            m_events.resize.emit();
+    });
+
+    m_realPosition->setUpdateCallback([this](auto) {
+        if (m_isMapped && m_monitor != m_prevMonitor) {
+            m_prevMonitor = m_monitor;
+            m_events.monitorChanged.emit();
+        }
+    });
+
     m_movingFromWorkspaceAlpha->setValueAndWarp(1.F);
 
     m_reportedSize = m_pendingReportedSize;
@@ -686,6 +698,9 @@ void CWindow::onBorderAngleAnimEnd(WP<CBaseAnimatedVariable> pav) {
 
 void CWindow::setHidden(bool hidden) {
     m_hidden = hidden;
+
+    if (hidden)
+        m_events.hide.emit();
 
     if (hidden && Desktop::focusState()->window() == m_self)
         Desktop::focusState()->window().reset();
@@ -1022,7 +1037,7 @@ void CWindow::activate(bool force) {
     m_isUrgent = true;
 
     g_pEventManager->postEvent(SHyprIPCEvent{.event = "urgent", .data = std::format("{:x}", rc<uintptr_t>(this))});
-    EMIT_HOOK_EVENT("urgent", m_self.lock());
+    Event::bus()->m_events.window.urgent.emit(m_self.lock());
 
     if (!force &&
         (!m_ruleApplicator->focusOnActivate().valueOr(*PFOCUSONACTIVATE) || (m_suppressedEvents & SUPPRESS_ACTIVATE_FOCUSONLY) || (m_suppressedEvents & SUPPRESS_ACTIVATE)))
@@ -1083,7 +1098,7 @@ void CWindow::onUpdateMeta() {
         m_title = NEWTITLE;
         g_pEventManager->postEvent(SHyprIPCEvent{.event = "windowtitle", .data = std::format("{:x}", rc<uintptr_t>(this))});
         g_pEventManager->postEvent(SHyprIPCEvent{.event = "windowtitlev2", .data = std::format("{:x},{}", rc<uintptr_t>(this), m_title)});
-        EMIT_HOOK_EVENT("windowTitle", m_self.lock());
+        Event::bus()->m_events.window.title.emit(m_self.lock());
 
         if (m_self == Desktop::focusState()->window()) { // if it's the active, let's post an event to update others
             g_pEventManager->postEvent(SHyprIPCEvent{.event = "activewindow", .data = m_class + "," + m_title});
@@ -1099,6 +1114,8 @@ void CWindow::onUpdateMeta() {
     const auto NEWCLASS = fetchClass();
     if (m_class != NEWCLASS) {
         m_class = NEWCLASS;
+
+        Event::bus()->m_events.window.class_.emit(m_self.lock());
 
         if (m_self == Desktop::focusState()->window()) { // if it's the active, let's post an event to update others
             g_pEventManager->postEvent(SHyprIPCEvent{.event = "activewindow", .data = m_class + "," + m_title});
@@ -1930,7 +1947,7 @@ void CWindow::mapWindow() {
 
     // emit the IPC event before the layout might focus the window to avoid a focus event first
     g_pEventManager->postEvent(SHyprIPCEvent{"openwindow", std::format("{:x},{},{},{}", m_self.lock(), PWORKSPACE->m_name, m_class, m_title)});
-    EMIT_HOOK_EVENT("openWindowEarly", m_self.lock());
+    Event::bus()->m_events.window.openEarly.emit(m_self.lock());
 
     if (*PAUTOGROUP                                                              // auto_group enabled
         && Desktop::focusState()->window()                                       // focused window exists
@@ -2063,7 +2080,7 @@ void CWindow::mapWindow() {
     Log::logger->log(Log::DEBUG, "Map request dispatched, monitor {}, window pos: {:5j}, window size: {:5j}", PMONITOR->m_name, m_realPosition->goal(), m_realSize->goal());
 
     // emit the hook event here after basic stuff has been initialized
-    EMIT_HOOK_EVENT("openWindow", m_self.lock());
+    Event::bus()->m_events.window.open.emit(m_self.lock());
 
     // apply data from default decos. Borders, shadows.
     g_pDecorationPositioner->forceRecalcFor(m_self.lock());
@@ -2094,8 +2111,11 @@ void CWindow::mapWindow() {
     if (m_workspace)
         m_workspace->updateWindows();
 
-    if (PMONITOR && isX11OverrideRedirect())
-        m_X11SurfaceScaledBy = PMONITOR->m_scale;
+    if (PMONITOR && isX11OverrideRedirect()) {
+        static auto PXWLFORCESCALEZERO = CConfigValue<Hyprlang::INT>("xwayland:force_zero_scaling");
+        if (*PXWLFORCESCALEZERO)
+            m_X11SurfaceScaledBy = PMONITOR->m_scale;
+    }
 }
 
 void CWindow::unmapWindow() {
@@ -2119,8 +2139,9 @@ void CWindow::unmapWindow() {
         m_originalClosedExtents = getFullWindowExtents();
     }
 
+    m_events.unmap.emit();
     g_pEventManager->postEvent(SHyprIPCEvent{"closewindow", std::format("{:x}", m_self.lock())});
-    EMIT_HOOK_EVENT("closeWindow", m_self.lock());
+    Event::bus()->m_events.window.close.emit(m_self.lock());
 
     if (m_isFloating && !m_isX11 && m_ruleApplicator->persistentSize().valueOrDefault()) {
         Log::logger->log(Log::DEBUG, "storing floating size {}x{} for window {}::{} on close", m_realSize->value().x, m_realSize->value().y, m_class, m_title);
@@ -2234,7 +2255,7 @@ void CWindow::unmapWindow() {
             g_pEventManager->postEvent(SHyprIPCEvent{"activewindow", ","});
             g_pEventManager->postEvent(SHyprIPCEvent{"activewindowv2", ""});
 
-            EMIT_HOOK_EVENT("activeWindow", Desktop::View::SWindowActiveEvent{nullptr COMMA FOCUS_REASON_OTHER});
+            Event::bus()->m_events.window.active.emit(m_self.lock(), FOCUS_REASON_OTHER);
         }
     } else {
         Log::logger->log(Log::DEBUG, "Unmapped was not focused, ignoring a refocus.");
@@ -2395,21 +2416,19 @@ void CWindow::unmanagedSetGeometry() {
 
     const auto  LOGICALPOS = g_pXWaylandManager->xwaylandToWaylandCoords(m_xwaylandSurface->m_geometry.pos());
 
-    if (abs(std::floor(POS.x) - LOGICALPOS.x) > 2 || abs(std::floor(POS.y) - LOGICALPOS.y) > 2 || abs(std::floor(SIZ.x) - m_xwaylandSurface->m_geometry.width) > 2 ||
-        abs(std::floor(SIZ.y) - m_xwaylandSurface->m_geometry.height) > 2) {
+    const auto  PMONITOR       = m_monitor.lock();
+    const auto  XWLSCALE       = (*PXWLFORCESCALEZERO && PMONITOR) ? PMONITOR->m_scale : 1.0;
+    const auto  LOGICALGEOSIZE = m_xwaylandSurface->m_geometry.size() / XWLSCALE;
+
+    if (abs(std::floor(POS.x) - LOGICALPOS.x) > 2 || abs(std::floor(POS.y) - LOGICALPOS.y) > 2 || abs(std::floor(SIZ.x) - LOGICALGEOSIZE.x) > 2 ||
+        abs(std::floor(SIZ.y) - LOGICALGEOSIZE.y) > 2) {
         Log::logger->log(Log::DEBUG, "Unmanaged window {} requests geometry update to {:j} {:j}", m_self.lock(), LOGICALPOS, m_xwaylandSurface->m_geometry.size());
 
         g_pHyprRenderer->damageWindow(m_self.lock());
         m_realPosition->setValueAndWarp(Vector2D(LOGICALPOS.x, LOGICALPOS.y));
 
-        if (abs(std::floor(SIZ.x) - m_xwaylandSurface->m_geometry.w) > 2 || abs(std::floor(SIZ.y) - m_xwaylandSurface->m_geometry.h) > 2)
-            m_realSize->setValueAndWarp(m_xwaylandSurface->m_geometry.size());
-
-        if (*PXWLFORCESCALEZERO) {
-            if (const auto PMONITOR = m_monitor.lock(); PMONITOR) {
-                m_realSize->setValueAndWarp(m_realSize->goal() / PMONITOR->m_scale);
-            }
-        }
+        if (abs(std::floor(SIZ.x) - LOGICALGEOSIZE.x) > 2 || abs(std::floor(SIZ.y) - LOGICALGEOSIZE.y) > 2)
+            m_realSize->setValueAndWarp(LOGICALGEOSIZE);
 
         m_position = m_realPosition->goal();
         m_size     = m_realSize->goal();

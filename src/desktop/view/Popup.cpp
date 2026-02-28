@@ -9,6 +9,7 @@
 #include "../../managers/animation/AnimationManager.hpp"
 #include "LayerSurface.hpp"
 #include "../../managers/input/InputManager.hpp"
+#include "../../managers/eventLoop/EventLoopManager.hpp"
 #include "../../render/Renderer.hpp"
 #include "../../render/OpenGL.hpp"
 #include <ranges>
@@ -108,8 +109,12 @@ void CPopup::initAllSignals() {
     m_alpha->setCallbackOnEnd(
         [this](auto) {
             if (inert()) {
-                g_pHyprRenderer->damageBox(CBox{coordsGlobal(), size()});
-                fullyDestroy();
+                g_pEventLoopManager->doLater([p = m_self] {
+                    if (!p)
+                        return;
+                    g_pHyprRenderer->damageBox(CBox{p->coordsGlobal(), p->size()});
+                    p->fullyDestroy();
+                });
             }
         },
         false);
@@ -194,7 +199,7 @@ void CPopup::onMap() {
 
     //unconstrain();
     sendScale();
-    m_resource->m_surface->m_surface->enter(PMONITOR->m_self.lock());
+    m_wlSurface->resource()->breadthfirst([PMONITOR](SP<CWLSurfaceResource> s, const Vector2D& offset, void* d) { s->enter(PMONITOR->m_self.lock()); }, nullptr);
 
     if (!m_layerOwner.expired() && m_layerOwner->m_layer < ZWLR_LAYER_SHELL_V1_LAYER_TOP)
         g_pHyprOpenGL->markBlurDirtyForMonitor(g_pCompositor->getMonitorFromID(m_layerOwner->m_layer));
@@ -398,10 +403,14 @@ void CPopup::recheckChildrenRecursive() {
     std::vector<WP<CPopup>> cpy;
     std::ranges::for_each(m_children, [&cpy](const auto& el) { cpy.emplace_back(el); });
     for (auto const& c : cpy) {
-        if (!c->visible())
+        if (!c || !c->visible())
             continue;
-        c->onCommit(true);
-        c->recheckChildrenRecursive();
+
+        // keep ref, onCommit can call onDestroy
+        auto x = c.lock();
+
+        x->onCommit(true);
+        x->recheckChildrenRecursive();
     }
 }
 

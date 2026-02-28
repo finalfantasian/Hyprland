@@ -4,7 +4,7 @@
 #include "../utils/SetUtils.hpp"
 #include "../../view/Window.hpp"
 #include "../../types/OverridableVar.hpp"
-#include "../../../managers/HookSystemManager.hpp"
+#include "../../../event/EventBus.hpp"
 
 #include <hyprutils/string/String.hpp>
 
@@ -158,6 +158,8 @@ CWindowRuleApplicator::SRuleResult CWindowRuleApplicator::applyDynamicRule(const
                             Types::COverridableVar(CGradientValueData(CHyprColor(configStringToInt(colorsAndAngles[0]).value_or(0))), Types::PRIORITY_WINDOW_RULE);
                         m_inactiveBorderColor.first =
                             Types::COverridableVar(CGradientValueData(CHyprColor(configStringToInt(colorsAndAngles[1]).value_or(0))), Types::PRIORITY_WINDOW_RULE);
+                        m_activeBorderColor.second |= rule->getPropertiesMask();
+                        m_inactiveBorderColor.second |= rule->getPropertiesMask();
                         break;
                     }
 
@@ -634,5 +636,5 @@ void CWindowRuleApplicator::propertiesChanged(std::underlying_type_t<eRuleProper
         g_pDecorationPositioner->forceRecalcFor(m_window.lock());
 
     // for plugins
-    EMIT_HOOK_EVENT("windowUpdateRules", m_window.lock());
+    Event::bus()->m_events.window.updateRules.emit(m_window.lock());
 }
