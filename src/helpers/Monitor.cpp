@@ -30,7 +30,7 @@
 #include "../hyprerror/HyprError.hpp"
 #include "../layout/LayoutManager.hpp"
 #include "../i18n/Engine.hpp"
-#include "../protocols/types/ColorManagement.hpp"
+#include "../helpers/cm/ColorManagement.hpp"
 #include "sync/SyncTimeline.hpp"
 #include "time/Time.hpp"
 #include "../desktop/view/LayerSurface.hpp"
