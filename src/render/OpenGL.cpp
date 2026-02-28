@@ -20,7 +20,6 @@
 #include "../protocols/core/Compositor.hpp"
 #include "../protocols/ColorManagement.hpp"
 #include "../helpers/cm/ColorManagement.hpp"
-#include "../managers/HookSystemManager.hpp"
 #include "../managers/input/InputManager.hpp"
 #include "../managers/eventLoop/EventLoopManager.hpp"
 #include "../managers/CursorManager.hpp"
