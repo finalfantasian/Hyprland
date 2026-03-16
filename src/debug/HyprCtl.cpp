@@ -491,11 +491,11 @@ static std::string getWorkspaceRuleData(const SWorkspaceRule& r, eHyprCtlOutputF
         const std::string default_    = sc<bool>(r.isDefault) ? std::format(",\n    \"default\": {}", boolToString(r.isDefault)) : "";
         const std::string persistent  = sc<bool>(r.isPersistent) ? std::format(",\n    \"persistent\": {}", boolToString(r.isPersistent)) : "";
         const std::string gapsIn      = sc<bool>(r.gapsIn) ?
-                 std::format(",\n    \"gapsIn\": [{}, {}, {}, {}]", r.gapsIn.value().m_top, r.gapsIn.value().m_right, r.gapsIn.value().m_bottom, r.gapsIn.value().m_left) :
-                 "";
+            std::format(",\n    \"gapsIn\": [{}, {}, {}, {}]", r.gapsIn.value().m_top, r.gapsIn.value().m_right, r.gapsIn.value().m_bottom, r.gapsIn.value().m_left) :
+            "";
         const std::string gapsOut     = sc<bool>(r.gapsOut) ?
-                std::format(",\n    \"gapsOut\": [{}, {}, {}, {}]", r.gapsOut.value().m_top, r.gapsOut.value().m_right, r.gapsOut.value().m_bottom, r.gapsOut.value().m_left) :
-                "";
+            std::format(",\n    \"gapsOut\": [{}, {}, {}, {}]", r.gapsOut.value().m_top, r.gapsOut.value().m_right, r.gapsOut.value().m_bottom, r.gapsOut.value().m_left) :
+            "";
         const std::string borderSize  = sc<bool>(r.borderSize) ? std::format(",\n    \"borderSize\": {}", r.borderSize.value()) : "";
         const std::string border      = sc<bool>(r.noBorder) ? std::format(",\n    \"border\": {}", boolToString(!r.noBorder.value())) : "";
         const std::string rounding    = sc<bool>(r.noRounding) ? std::format(",\n    \"rounding\": {}", boolToString(!r.noRounding.value())) : "";
@@ -518,9 +518,9 @@ static std::string getWorkspaceRuleData(const SWorkspaceRule& r, eHyprCtlOutputF
                                                                         std::to_string(r.gapsIn.value().m_bottom), std::to_string(r.gapsIn.value().m_left)) :
                                                             std::format("\tgapsIn: <unset>\n");
         const std::string gapsOut    = sc<bool>(r.gapsOut) ?
-               std::format("\tgapsOut: {} {} {} {}\n", std::to_string(r.gapsOut.value().m_top), std::to_string(r.gapsOut.value().m_right), std::to_string(r.gapsOut.value().m_bottom),
-                           std::to_string(r.gapsOut.value().m_left)) :
-               std::format("\tgapsOut: <unset>\n");
+            std::format("\tgapsOut: {} {} {} {}\n", std::to_string(r.gapsOut.value().m_top), std::to_string(r.gapsOut.value().m_right), std::to_string(r.gapsOut.value().m_bottom),
+                        std::to_string(r.gapsOut.value().m_left)) :
+            std::format("\tgapsOut: <unset>\n");
         const std::string borderSize = std::format("\tborderSize: {}\n", sc<bool>(r.borderSize) ? std::to_string(r.borderSize.value()) : "<unset>");
         const std::string border     = std::format("\tborder: {}\n", sc<bool>(r.noBorder) ? boolToString(!r.noBorder.value()) : "<unset>");
         const std::string rounding   = std::format("\trounding: {}\n", sc<bool>(r.noRounding) ? boolToString(!r.noRounding.value()) : "<unset>");
@@ -1304,11 +1304,12 @@ static std::string dispatchKeyword(eHyprCtlOutputFormat format, std::string in) 
         Layout::Supplementary::algoMatcher()->updateWorkspaceLayouts();
 
     if (COMMAND.contains("decoration:screen_shader") || COMMAND == "source")
-        g_pHyprOpenGL->m_reloadScreenShader = true;
+        g_pHyprRenderer->m_reloadScreenShader = true;
 
     if (COMMAND.contains("blur") || COMMAND == "source") {
-        for (auto& [m, rd] : g_pHyprOpenGL->m_monitorRenderResources) {
-            rd.blurFBDirty = true;
+        for (auto const& m : g_pCompositor->m_monitors) {
+            if (m)
+                m->m_blurFBDirty = true;
         }
     }
 
@@ -2049,7 +2050,12 @@ static std::string submapRequest(eHyprCtlOutputFormat format, std::string reques
 }
 
 static std::string reloadShaders(eHyprCtlOutputFormat format, std::string request) {
-    if (g_pHyprOpenGL->initShaders())
+    CVarList vars(request, 0, ' ');
+
+    if (vars.size() > 2)
+        return "too many args";
+
+    if (g_pHyprOpenGL && g_pHyprRenderer->reloadShaders(vars.size() == 2 ? vars[1] : ""))
         return format == FORMAT_JSON ? "{\"ok\": true}" : "ok";
     else
         return format == FORMAT_JSON ? "{\"ok\": false}" : "error";
@@ -2076,8 +2082,8 @@ CHyprCtl::CHyprCtl() {
     registerCommand(SHyprCtlCommand{"locked", true, getIsLocked});
     registerCommand(SHyprCtlCommand{"descriptions", true, getDescriptions});
     registerCommand(SHyprCtlCommand{"submap", true, submapRequest});
-    registerCommand(SHyprCtlCommand{.name = "reloadshaders", .exact = true, .fn = reloadShaders});
 
+    registerCommand(SHyprCtlCommand{.name = "reloadshaders", .exact = false, .fn = reloadShaders});
     registerCommand(SHyprCtlCommand{"monitors", false, monitorsRequest});
     registerCommand(SHyprCtlCommand{"reload", false, reloadRequest});
     registerCommand(SHyprCtlCommand{"plugin", false, dispatchPlugin});
@@ -2184,10 +2190,11 @@ std::string CHyprCtl::getReply(std::string request) {
         g_pInputManager->setTouchDeviceConfigs(); // update touch device cfgs
         g_pInputManager->setTabletConfigs();      // update tablets
 
-        g_pHyprOpenGL->m_reloadScreenShader = true;
+        g_pHyprRenderer->m_reloadScreenShader = true;
 
-        for (auto& [m, rd] : g_pHyprOpenGL->m_monitorRenderResources) {
-            rd.blurFBDirty = true;
+        for (auto const& m : g_pCompositor->m_monitors) {
+            if (m)
+                m->m_blurFBDirty = true;
         }
 
         for (auto const& w : g_pCompositor->m_windows) {
@@ -2195,6 +2202,15 @@ std::string CHyprCtl::getReply(std::string request) {
                 continue;
 
             Desktop::Rule::ruleEngine()->updateAllRules();
+        }
+
+        for (const auto& ws : g_pCompositor->getWorkspaces()) {
+            if (!ws)
+                continue;
+
+            ws->updateWindows();
+            ws->updateWindowData();
+            ws->updateWindowDecos();
         }
 
         for (auto const& m : g_pCompositor->m_monitors) {
@@ -2210,16 +2226,38 @@ std::string CHyprCtl::makeDynamicCall(const std::string& input) {
 }
 
 static bool successWrite(int fd, const std::string& data, bool needLog = true) {
-    if (write(fd, data.c_str(), data.length()) > 0)
-        return true;
+    size_t                 totalWritten = 0;
+    size_t                 remaining    = data.length();
+    size_t                 waitsDone    = 0;
+    constexpr const size_t MAX_WAITS    = 20; // 2000µs = 2ms
 
-    if (errno == EAGAIN)
-        return true;
+    while (totalWritten < data.length()) {
+        ssize_t written = write(fd, data.c_str() + totalWritten, remaining);
 
-    if (needLog)
-        Log::logger->log(Log::ERR, "Couldn't write to socket. Error: " + std::string(strerror(errno)));
+        if (waitsDone > MAX_WAITS) {
+            Log::logger->log(Log::ERR, "Couldn't write to socket. Buffer was full and the client couldn't read in time.");
+            return false;
+        }
 
-    return false;
+        if (written < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                // socket buffer full, wait a bit and retry
+                std::this_thread::sleep_for(std::chrono::microseconds(100));
+                waitsDone++;
+                continue;
+            }
+            if (needLog)
+                Log::logger->log(Log::ERR, "Couldn't write to socket. Error: {}", strerror(errno));
+            return false;
+        }
+
+        waitsDone = 0;
+
+        totalWritten += written;
+        remaining -= written;
+    }
+
+    return true;
 }
 
 static void runWritingDebugLogThread(const int conn) {

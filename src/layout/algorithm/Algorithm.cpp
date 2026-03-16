@@ -42,16 +42,16 @@ void CAlgorithm::removeTarget(SP<ITarget> target) {
     const bool IS_FLOATING = std::ranges::contains(m_floatingTargets, target);
 
     if (IS_FLOATING) {
-        m_floating->removeTarget(target);
         std::erase(m_floatingTargets, target);
+        m_floating->removeTarget(target);
         return;
     }
 
     const bool IS_TILED = std::ranges::contains(m_tiledTargets, target);
 
     if (IS_TILED) {
-        m_tiled->removeTarget(target);
         std::erase(m_tiledTargets, target);
+        m_tiled->removeTarget(target);
         return;
     }
 
@@ -105,7 +105,10 @@ void CAlgorithm::recalculate() {
     m_floating->recalculate();
 
     const auto PWORKSPACE = m_space->workspace();
-    const auto PMONITOR   = PWORKSPACE->m_monitor;
+    if (!PWORKSPACE)
+        return;
+
+    const auto PMONITOR = PWORKSPACE->m_monitor;
 
     if (PWORKSPACE->m_hasFullscreenWindow && PMONITOR) {
         // massive hack from the fullscreen func
@@ -261,4 +264,11 @@ SP<ITarget> CAlgorithm::getNextCandidate(SP<ITarget> old) {
 
     // god damn it, maybe empty?
     return nullptr;
+}
+
+void CAlgorithm::setTargetGeom(const CBox& box, SP<ITarget> target) {
+    if (!target->floating() || !std::ranges::contains(m_floatingTargets, target))
+        return;
+
+    m_floating->setTargetGeom(box, target);
 }

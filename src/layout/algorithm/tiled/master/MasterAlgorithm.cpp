@@ -81,8 +81,8 @@ void CMasterAlgorithm::addTarget(SP<ITarget> target, bool firstMap) {
     float        lastSplitPercent   = *PMFACT;
 
     auto         OPENINGON = isWindowTiled(Desktop::focusState()->window()) && Desktop::focusState()->window()->m_workspace == PWORKSPACE ?
-                getNodeFromWindow(Desktop::focusState()->window()) :
-                getMasterNode();
+        getNodeFromWindow(Desktop::focusState()->window()) :
+        getMasterNode();
 
     const auto   MOUSECOORDS   = g_pInputManager->getMouseCoordsInternal();
     static auto  PDROPATCURSOR = CConfigValue<Hyprlang::INT>("master:drop_at_cursor");
@@ -403,7 +403,9 @@ void CMasterAlgorithm::swapTargets(SP<ITarget> a, SP<ITarget> b) {
 }
 
 void CMasterAlgorithm::moveTargetInDirection(SP<ITarget> t, Math::eDirection dir, bool silent) {
-    const auto PWINDOW2 = g_pCompositor->getWindowInDirection(t->window(), dir);
+    static auto PMONITORFALLBACK = CConfigValue<Hyprlang::INT>("binds:window_direction_monitor_fallback");
+
+    const auto  PWINDOW2 = g_pCompositor->getWindowInDirection(t->window(), dir);
 
     if (!t->window())
         return;
@@ -424,7 +426,10 @@ void CMasterAlgorithm::moveTargetInDirection(SP<ITarget> t, Math::eDirection dir
     t->window()->setAnimationsToMove();
 
     if (t->window()->m_workspace != targetWs) {
-        t->assignToSpace(targetWs->m_space);
+        if (!*PMONITORFALLBACK)
+            return; // noop
+
+        t->assignToSpace(targetWs->m_space, focalPointForDir(t, dir));
     } else if (PWINDOW2) {
         // if same monitor, switch windows
         g_layoutManager->switchTargets(t, PWINDOW2->layoutTarget());
@@ -720,8 +725,8 @@ std::expected<void, std::string> CMasterAlgorithm::layoutMsg(const std::string_v
 
         for (auto& nd : m_masterNodesData) {
             if (!nd->isMaster) {
-                const auto newMaster = nd;
-                newMaster->isMaster  = true;
+                const auto& newMaster = nd;
+                newMaster->isMaster   = true;
 
                 auto newMasterIt = std::ranges::find(m_masterNodesData, newMaster);
 
@@ -756,8 +761,8 @@ std::expected<void, std::string> CMasterAlgorithm::layoutMsg(const std::string_v
 
         for (auto& nd : m_masterNodesData | std::views::reverse) {
             if (!nd->isMaster) {
-                const auto newMaster = nd;
-                newMaster->isMaster  = true;
+                const auto& newMaster = nd;
+                newMaster->isMaster   = true;
 
                 auto newMasterIt = std::ranges::find(m_masterNodesData, newMaster);
 
@@ -956,7 +961,9 @@ void CMasterAlgorithm::calculateWorkspace() {
     const auto                    STACKWINDOWS     = WINDOWS - MASTERS;
     const auto                    WORKAREA         = m_parent->space()->workArea();
     const auto                    PMONITOR         = m_parent->space()->workspace()->m_monitor;
-    const auto                    UNRESERVED_WIDTH = WORKAREA.width + PMONITOR->m_reservedArea.left() + PMONITOR->m_reservedArea.right();
+    const auto                    reservedLeft     = PMONITOR ? PMONITOR->m_reservedArea.left() : 0;
+    const auto                    reservedRight    = PMONITOR ? PMONITOR->m_reservedArea.right() : 0;
+    const auto                    UNRESERVED_WIDTH = WORKAREA.width + reservedLeft + reservedRight;
 
     if (orientation == ORIENTATION_CENTER) {
         if (STACKWINDOWS >= *SLAVECOUNTFORCENTER)
@@ -1074,7 +1081,7 @@ void CMasterAlgorithm::calculateWorkspace() {
             }
 
             nd->size     = Vector2D(WIDTH, HEIGHT);
-            nd->position = (*PIGNORERESERVED && centerMasterWindow ? WORKAREA.pos() - Vector2D(PMONITOR->m_reservedArea.left(), 0.0) : WORKAREA.pos()) + Vector2D(nextX, nextY);
+            nd->position = (*PIGNORERESERVED && centerMasterWindow ? WORKAREA.pos() - Vector2D(reservedLeft, 0.0) : WORKAREA.pos()) + Vector2D(nextX, nextY);
             nd->pTarget->setPositionGlobal({nd->position, nd->size});
 
             mastersLeft--;
@@ -1192,7 +1199,7 @@ void CMasterAlgorithm::calculateWorkspace() {
                 continue;
 
             if (onRight) {
-                nextX      = WIDTH + PMASTERNODE->size.x - (*PIGNORERESERVED ? PMONITOR->m_reservedArea.left() : 0);
+                nextX      = WIDTH + PMASTERNODE->size.x - (*PIGNORERESERVED ? reservedLeft : 0);
                 nextY      = nextYR;
                 heightLeft = heightLeftR;
                 slavesLeft = slavesLeftR;
@@ -1217,7 +1224,7 @@ void CMasterAlgorithm::calculateWorkspace() {
                 }
             }
 
-            nd->size     = Vector2D(*PIGNORERESERVED ? (WIDTH - (onRight ? PMONITOR->m_reservedArea.right() : PMONITOR->m_reservedArea.left())) : WIDTH, HEIGHT);
+            nd->size     = Vector2D(*PIGNORERESERVED ? (WIDTH - (onRight ? reservedRight : reservedLeft)) : WIDTH, HEIGHT);
             nd->position = WORKAREA.pos() + Vector2D(nextX, nextY);
             nd->pTarget->setPositionGlobal({nd->position, nd->size});
 

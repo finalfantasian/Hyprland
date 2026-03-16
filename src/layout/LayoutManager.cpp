@@ -11,13 +11,7 @@
 
 using namespace Layout;
 
-CLayoutManager::CLayoutManager() {
-    static auto P = Event::bus()->m_events.monitor.layoutChanged.listen([] {
-        for (const auto& ws : g_pCompositor->getWorkspaces()) {
-            ws->m_space->recheckWorkArea();
-        }
-    });
-}
+CLayoutManager::CLayoutManager() = default;
 
 void CLayoutManager::newTarget(SP<ITarget> target, SP<CSpace> space) {
     // on a new target: remember desired pos for float, if available
@@ -67,6 +61,13 @@ void CLayoutManager::resizeTarget(const Vector2D& Δ, SP<ITarget> target, eRectC
     target->space()->resizeTarget(Δ, target, corner);
 }
 
+void CLayoutManager::setTargetGeom(const CBox& box, SP<ITarget> target) {
+    if (!target->floating())
+        return;
+
+    target->space()->setTargetGeom(box, target);
+}
+
 std::expected<void, std::string> CLayoutManager::layoutMsg(const std::string_view& sv) {
 
     const auto MONITOR = Desktop::focusState()->monitor();
@@ -94,7 +95,8 @@ void CLayoutManager::endDragTarget() {
 }
 
 void CLayoutManager::fullscreenRequestForTarget(SP<ITarget> target, eFullscreenMode currentEffectiveMode, eFullscreenMode effectiveMode) {
-    target->space()->setFullscreen(target, effectiveMode);
+    if (target->space())
+        target->space()->setFullscreen(target, effectiveMode);
 }
 
 void CLayoutManager::switchTargets(SP<ITarget> a, SP<ITarget> b, bool preserveFocus) {
@@ -122,6 +124,9 @@ void CLayoutManager::moveInDirection(SP<ITarget> target, const std::string& dire
         Log::logger->log(Log::ERR, "invalid direction for moveInDirection: {}", direction);
         return;
     }
+
+    if (!target->space())
+        return;
 
     target->space()->moveTargetInDirection(target, dir, silent);
 }

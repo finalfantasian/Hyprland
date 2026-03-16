@@ -7,6 +7,7 @@
 #include "../desktop/view/Window.hpp"
 #include "../render/OpenGL.hpp"
 #include "../desktop/state/FocusState.hpp"
+#include "render/Renderer.hpp"
 #include <cstring>
 
 using namespace Screenshare;
@@ -39,14 +40,13 @@ CImageCopyCaptureSession::CImageCopyCaptureSession(SP<CExtImageCopyCaptureSessio
 
     if UNLIKELY (!m_session) {
         m_resource->sendStopped();
-        m_resource->error(-1, "unable to share screen");
         return;
     }
 
     sendConstraints();
 
     m_listeners.constraintsChanged = m_session->m_events.constraintsChanged.listen([this]() { sendConstraints(); });
-    m_listeners.stopped            = m_session->m_events.stopped.listen([this]() { PROTO::imageCopyCapture->destroyResource(this); });
+    m_listeners.stopped            = m_session->m_events.stopped.listen([this]() { m_resource->sendStopped(); });
 }
 
 CImageCopyCaptureSession::~CImageCopyCaptureSession() {
@@ -65,14 +65,13 @@ void CImageCopyCaptureSession::sendConstraints() {
 
     if UNLIKELY (formats.empty()) {
         m_session->stop();
-        m_resource->error(-1, "no formats available");
         return;
     }
 
     for (DRMFormat format : formats) {
         m_resource->sendShmFormat(NFormatUtils::drmToShm(format));
 
-        auto     modifiers = g_pHyprOpenGL->getDRMFormatModifiers(format);
+        auto     modifiers = g_pHyprRenderer->getDRMFormatModifiers(format);
 
         wl_array modsArr;
         wl_array_init(&modsArr);
@@ -143,7 +142,6 @@ CImageCopyCaptureCursorSession::CImageCopyCaptureCursorSession(SP<CExtImageCopyC
         m_session = Screenshare::mgr()->newCursorSession(pMgr->client(), m_pointer);
         if UNLIKELY (!m_session) {
             m_sessionResource->sendStopped();
-            m_sessionResource->error(-1, "unable to share cursor");
             return;
         }
 
@@ -281,13 +279,12 @@ void CImageCopyCaptureCursorSession::sendConstraints() {
     auto format = m_session->format();
     if UNLIKELY (format == DRM_FORMAT_INVALID) {
         m_session->stop();
-        m_sessionResource->error(-1, "no formats available");
         return;
     }
 
     m_sessionResource->sendShmFormat(NFormatUtils::drmToShm(format));
 
-    auto     modifiers = g_pHyprOpenGL->getDRMFormatModifiers(format);
+    auto     modifiers = g_pHyprRenderer->getDRMFormatModifiers(format);
 
     wl_array modsArr;
     wl_array_init(&modsArr);
@@ -313,13 +310,8 @@ void CImageCopyCaptureCursorSession::sendConstraints() {
 
 void CImageCopyCaptureCursorSession::sendCursorEvents() {
     const auto PERM = g_pDynamicPermissionManager->clientPermissionMode(m_resource->client(), PERMISSION_TYPE_CURSOR_POS);
-    if (PERM != PERMISSION_RULE_ALLOW_MODE_ALLOW) {
-        if (PERM == PERMISSION_RULE_ALLOW_MODE_DENY) {
-            m_resource->error(-1, "client not allowed to capture cursor");
-            PROTO::imageCopyCapture->destroyResource(this);
-        }
+    if (PERM != PERMISSION_RULE_ALLOW_MODE_ALLOW)
         return;
-    }
 
     const auto PMONITOR  = m_source->m_monitor.expired() ? m_source->m_window->m_monitor.lock() : m_source->m_monitor.lock();
     CBox       sourceBox = m_source->logicalBox();
@@ -484,7 +476,7 @@ void CImageCopyCaptureProtocol::bindManager(wl_client* client, void* data, uint3
         SP<CImageCaptureSource> source = PROTO::imageCaptureSource->sourceFromResource(source_);
         if (!source) {
             LOGM(Log::ERR, "Client tried to create image copy capture session from invalid source");
-            destroyResource(pMgr);
+            pMgr->error(-1, "invalid image capture source");
             return;
         }
 

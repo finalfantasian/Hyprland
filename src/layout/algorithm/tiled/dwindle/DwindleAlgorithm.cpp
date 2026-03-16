@@ -34,11 +34,12 @@ struct Layout::Tiled::SDwindleNodeData {
 
     void recalcSizePosRecursive(bool force = false, bool horizontalOverride = false, bool verticalOverride = false) {
         if (children[0]) {
-            static auto PSMARTSPLIT    = CConfigValue<Hyprlang::INT>("dwindle:smart_split");
-            static auto PPRESERVESPLIT = CConfigValue<Hyprlang::INT>("dwindle:preserve_split");
-            static auto PFLMULT        = CConfigValue<Hyprlang::FLOAT>("dwindle:split_width_multiplier");
+            static auto PSMARTSPLIT       = CConfigValue<Hyprlang::INT>("dwindle:smart_split");
+            static auto PPRESERVESPLIT    = CConfigValue<Hyprlang::INT>("dwindle:preserve_split");
+            static auto PFLMULT           = CConfigValue<Hyprlang::FLOAT>("dwindle:split_width_multiplier");
+            static auto PPRECISEMOUSEMOVE = CConfigValue<Hyprlang::INT>("dwindle:precise_mouse_move");
 
-            if (*PPRESERVESPLIT == 0 && *PSMARTSPLIT == 0)
+            if (*PPRESERVESPLIT == 0 && *PSMARTSPLIT == 0 && *PPRECISEMOUSEMOVE == 0)
                 splitTop = box.h * *PFLMULT > box.w;
 
             if (verticalOverride)
@@ -71,7 +72,7 @@ void CDwindleAlgorithm::newTarget(SP<ITarget> target) {
     addTarget(target);
 }
 
-void CDwindleAlgorithm::addTarget(SP<ITarget> target, bool newTarget) {
+void CDwindleAlgorithm::addTarget(SP<ITarget> target) {
     const auto WORK_AREA = m_parent->space()->workArea();
 
     const auto PNODE = m_dwindleNodesData.emplace_back(makeShared<SDwindleNodeData>());
@@ -99,11 +100,13 @@ void CDwindleAlgorithm::addTarget(SP<ITarget> target, bool newTarget) {
         if (!OPENINGON && g_pCompositor->isPointOnReservedArea(MOUSECOORDS, ACTIVE_MON))
             OPENINGON = getClosestNode(MOUSECOORDS);
 
-    } else if (*PUSEACTIVE) {
+    } else if (*PUSEACTIVE || m_overrideFocalPoint) {
         const auto ACTIVE_WINDOW = Desktop::focusState()->window();
 
-        if (!m_overrideFocalPoint && ACTIVE_WINDOW && !ACTIVE_WINDOW->m_isFloating && ACTIVE_WINDOW != target->window() && ACTIVE_WINDOW->m_workspace == PWORKSPACE &&
-            ACTIVE_WINDOW->m_isMapped)
+        if (m_overrideFocalPoint)
+            OPENINGON = getClosestNode(*m_overrideFocalPoint);
+        else if (!m_overrideFocalPoint && ACTIVE_WINDOW && !ACTIVE_WINDOW->m_isFloating && ACTIVE_WINDOW != target->window() && ACTIVE_WINDOW->m_workspace == PWORKSPACE &&
+                 ACTIVE_WINDOW->m_isMapped)
             OPENINGON = getNodeFromWindow(ACTIVE_WINDOW);
 
         if (!OPENINGON)
@@ -157,6 +160,7 @@ void CDwindleAlgorithm::addTarget(SP<ITarget> target, bool newTarget) {
     static auto PERMANENTDIRECTIONOVERRIDE = CConfigValue<Hyprlang::INT>("dwindle:permanent_direction_override");
     static auto PSMARTSPLIT                = CConfigValue<Hyprlang::INT>("dwindle:smart_split");
     static auto PSPLITBIAS                 = CConfigValue<Hyprlang::INT>("dwindle:split_bias");
+    static auto PPRECISEMOUSEMOVE          = CConfigValue<Hyprlang::INT>("dwindle:precise_mouse_move");
 
     bool        horizontalOverride = false;
     bool        verticalOverride   = false;
@@ -182,7 +186,7 @@ void CDwindleAlgorithm::addTarget(SP<ITarget> target, bool newTarget) {
         // whether or not the override persists after opening one window
         if (*PERMANENTDIRECTIONOVERRIDE == 0)
             m_overrideDirection = Math::DIRECTION_DEFAULT;
-    } else if (*PSMARTSPLIT == 1) {
+    } else if (*PSMARTSPLIT == 1 || (*PPRECISEMOUSEMOVE == 1 && g_layoutManager->dragController()->wasDraggingWindow())) {
         const auto PARENT_CENTER      = NEWPARENT->box.pos() + NEWPARENT->box.size() / 2;
         const auto PARENT_PROPORTIONS = NEWPARENT->box.h / NEWPARENT->box.w;
         const auto DELTA              = MOUSECOORDS - PARENT_CENTER;
@@ -213,11 +217,8 @@ void CDwindleAlgorithm::addTarget(SP<ITarget> target, bool newTarget) {
                 NEWPARENT->children[1] = OPENINGON;
             }
         }
-    } else if (*PFORCESPLIT == 0 || !newTarget) {
-        if ((SIDEBYSIDE &&
-             VECINRECT(MOUSECOORDS, NEWPARENT->box.x, NEWPARENT->box.y / *PWIDTHMULTIPLIER, NEWPARENT->box.x + NEWPARENT->box.w / 2.f, NEWPARENT->box.y + NEWPARENT->box.h)) ||
-            (!SIDEBYSIDE &&
-             VECINRECT(MOUSECOORDS, NEWPARENT->box.x, NEWPARENT->box.y / *PWIDTHMULTIPLIER, NEWPARENT->box.x + NEWPARENT->box.w, NEWPARENT->box.y + NEWPARENT->box.h / 2.f))) {
+    } else if (*PFORCESPLIT == 0 || m_overrideFocalPoint) {
+        if ((SIDEBYSIDE && MOUSECOORDS.x < NEWPARENT->box.x + (NEWPARENT->box.w / 2.F)) || (!SIDEBYSIDE && MOUSECOORDS.y < NEWPARENT->box.y + (NEWPARENT->box.h / 2.F))) {
             // we are hovering over the first node, make PNODE first.
             NEWPARENT->children[1] = OPENINGON;
             NEWPARENT->children[0] = PNODE;
@@ -226,14 +227,12 @@ void CDwindleAlgorithm::addTarget(SP<ITarget> target, bool newTarget) {
             NEWPARENT->children[0] = OPENINGON;
             NEWPARENT->children[1] = PNODE;
         }
+    } else if (*PFORCESPLIT == 1) {
+        NEWPARENT->children[1] = OPENINGON;
+        NEWPARENT->children[0] = PNODE;
     } else {
-        if (*PFORCESPLIT == 1) {
-            NEWPARENT->children[1] = OPENINGON;
-            NEWPARENT->children[0] = PNODE;
-        } else {
-            NEWPARENT->children[0] = OPENINGON;
-            NEWPARENT->children[1] = PNODE;
-        }
+        NEWPARENT->children[0] = OPENINGON;
+        NEWPARENT->children[1] = PNODE;
     }
 
     // split in favor of a specific window
@@ -242,11 +241,10 @@ void CDwindleAlgorithm::addTarget(SP<ITarget> target, bool newTarget) {
 
     // and update the previous parent if it exists
     if (OPENINGON->pParent) {
-        if (OPENINGON->pParent->children[0] == OPENINGON) {
+        if (OPENINGON->pParent->children[0] == OPENINGON)
             OPENINGON->pParent->children[0] = NEWPARENT;
-        } else {
+        else
             OPENINGON->pParent->children[1] = NEWPARENT;
-        }
     }
 
     // Update the children
@@ -270,7 +268,7 @@ void CDwindleAlgorithm::addTarget(SP<ITarget> target, bool newTarget) {
 
 void CDwindleAlgorithm::movedTarget(SP<ITarget> target, std::optional<Vector2D> focalPoint) {
     m_overrideFocalPoint = focalPoint;
-    addTarget(target, false);
+    addTarget(target);
     m_overrideFocalPoint.reset();
 }
 
@@ -551,41 +549,35 @@ std::optional<Vector2D> CDwindleAlgorithm::predictSizeForNewTarget() {
 }
 
 void CDwindleAlgorithm::moveTargetInDirection(SP<ITarget> t, Math::eDirection dir, bool silent) {
+    static auto    PMONITORFALLBACK = CConfigValue<Hyprlang::INT>("binds:window_direction_monitor_fallback");
+
     const auto     PNODE       = getNodeFromTarget(t);
     const Vector2D originalPos = t->position().middle();
 
     if (!PNODE || !t->window())
         return;
 
-    Vector2D   focalPoint;
+    const auto FOCAL_POINT = focalPointForDir(t, dir);
 
-    const auto WINDOWIDEALBB =
-        t->fullscreenMode() != FSMODE_NONE ? m_parent->space()->workspace()->m_monitor->logicalBox() : t->window()->getWindowIdealBoundingBoxIgnoreReserved();
+    const auto PMONITORFOCAL = g_pCompositor->getMonitorFromVector(FOCAL_POINT.value_or(t->position().middle()));
 
-    switch (dir) {
-        case Math::DIRECTION_UP: focalPoint = WINDOWIDEALBB.pos() + Vector2D{WINDOWIDEALBB.size().x / 2.0, -1.0}; break;
-        case Math::DIRECTION_DOWN: focalPoint = WINDOWIDEALBB.pos() + Vector2D{WINDOWIDEALBB.size().x / 2.0, WINDOWIDEALBB.size().y + 1.0}; break;
-        case Math::DIRECTION_LEFT: focalPoint = WINDOWIDEALBB.pos() + Vector2D{-1.0, WINDOWIDEALBB.size().y / 2.0}; break;
-        case Math::DIRECTION_RIGHT: focalPoint = WINDOWIDEALBB.pos() + Vector2D{WINDOWIDEALBB.size().x + 1.0, WINDOWIDEALBB.size().y / 2.0}; break;
-        default: return;
-    }
+    if (PMONITORFOCAL != m_parent->space()->workspace()->m_monitor && !*PMONITORFALLBACK)
+        return; // noop
 
     t->window()->setAnimationsToMove();
 
     removeTarget(t);
 
-    const auto PMONITORFOCAL = g_pCompositor->getMonitorFromVector(focalPoint);
-
     if (PMONITORFOCAL != m_parent->space()->workspace()->m_monitor) {
         // move with a focal point
 
         if (PMONITORFOCAL->m_activeWorkspace)
-            t->assignToSpace(PMONITORFOCAL->m_activeWorkspace->m_space);
+            t->assignToSpace(PMONITORFOCAL->m_activeWorkspace->m_space, FOCAL_POINT);
 
         return;
     }
 
-    movedTarget(t, focalPoint);
+    movedTarget(t, FOCAL_POINT);
 
     // restore focus to the previous position
     if (silent) {
@@ -665,11 +657,28 @@ std::expected<void, std::string> CDwindleAlgorithm::layoutMsg(const std::string_
     const auto CURRENT_NODE = getNodeFromWindow(Desktop::focusState()->window());
 
     if (ARGS[0] == "togglesplit") {
-        if (CURRENT_NODE)
-            toggleSplit(CURRENT_NODE);
+        if (CURRENT_NODE) {
+            if (!toggleSplit(CURRENT_NODE))
+                return std::unexpected("can't togglesplit in the current workspace");
+        }
     } else if (ARGS[0] == "swapsplit") {
-        if (CURRENT_NODE)
-            swapSplit(CURRENT_NODE);
+        if (CURRENT_NODE) {
+            if (!swapSplit(CURRENT_NODE))
+                return std::unexpected("can't swapsplit in the current workspace");
+        }
+    } else if (ARGS[0] == "rotatesplit") {
+        if (CURRENT_NODE) {
+            int angle = 90;
+            if (!ARGS[1].empty()) {
+                try {
+                    angle = std::stoi(std::string{ARGS[1]});
+                } catch (const std::exception& e) {
+                    Log::logger->log(Log::WARN, "Invalid angle argument for rotatesplit: {}", ARGS[1]);
+                    return std::unexpected("Invalid angle argument");
+                }
+            }
+            rotateSplit(CURRENT_NODE, angle);
+        }
     } else if (ARGS[0] == "movetoroot") {
         auto node = CURRENT_NODE;
         if (!ARGS[1].empty()) {
@@ -679,7 +688,8 @@ std::expected<void, std::string> CDwindleAlgorithm::layoutMsg(const std::string_
         }
 
         const auto STABLE = ARGS[2].empty() || ARGS[2] != "unstable";
-        moveToRoot(node, STABLE);
+        if (!moveToRoot(node, STABLE))
+            return std::unexpected("can't movetoroot in the current workspace");
     } else if (ARGS[0] == "preselect") {
         auto direction = ARGS[1];
 
@@ -714,42 +724,102 @@ std::expected<void, std::string> CDwindleAlgorithm::layoutMsg(const std::string_
                 break;
             }
         }
+    } else if (ARGS[0] == "splitratio") {
+        auto ratio = ARGS[1];
+        bool exact = ARGS[2].starts_with("exact");
+
+        if (ratio.empty())
+            return std::unexpected("splitratio requires an arg");
+
+        auto delta = getPlusMinusKeywordResult(std::string{ratio}, 0.F);
+
+        if (!CURRENT_NODE || !CURRENT_NODE->pParent)
+            return std::unexpected("cannot alter split ratio on no / single node");
+
+        if (!delta)
+            return std::unexpected(std::format("failed to parse \"{}\" as a delta", ratio));
+
+        const float newRatio              = exact ? *delta : CURRENT_NODE->pParent->splitRatio + *delta;
+        CURRENT_NODE->pParent->splitRatio = std::clamp(newRatio, 0.1F, 1.9F);
+
+        CURRENT_NODE->pParent->recalcSizePosRecursive();
     }
 
     return {};
 }
 
-void CDwindleAlgorithm::toggleSplit(SP<SDwindleNodeData> x) {
+bool CDwindleAlgorithm::toggleSplit(SP<SDwindleNodeData> x) {
     if (!x || !x->pParent)
-        return;
+        return false;
 
     if (x->pTarget->fullscreenMode() != FSMODE_NONE)
-        return;
+        return false;
 
     x->pParent->splitTop = !x->pParent->splitTop;
 
     x->pParent->recalcSizePosRecursive();
+
+    return true;
 }
 
-void CDwindleAlgorithm::swapSplit(SP<SDwindleNodeData> x) {
-    if (x->pTarget->fullscreenMode() != FSMODE_NONE)
-        return;
+bool CDwindleAlgorithm::swapSplit(SP<SDwindleNodeData> x) {
+    if (x->pTarget->fullscreenMode() != FSMODE_NONE || !x->pParent)
+        return false;
 
     std::swap(x->pParent->children[0], x->pParent->children[1]);
 
     x->pParent->recalcSizePosRecursive();
+
+    return true;
 }
 
-void CDwindleAlgorithm::moveToRoot(SP<SDwindleNodeData> x, bool stable) {
+void CDwindleAlgorithm::rotateSplit(SP<SDwindleNodeData> x, int angle) {
     if (!x || !x->pParent)
         return;
 
     if (x->pTarget->fullscreenMode() != FSMODE_NONE)
         return;
 
+    // normalize the angle to multiples of 90 degrees
+    int  normalizedAngle = ((sc<int>(angle / 90) % 4) + 4) % 4; // ensures positive modulo
+
+    auto pParent = x->pParent;
+
+    bool shouldSwap = false;
+
+    switch (normalizedAngle) {
+        case 0: // 0 degrees - no change
+            break;
+        case 1:
+            if (pParent->splitTop)
+                shouldSwap = true;
+            pParent->splitTop = !pParent->splitTop;
+            break;
+        case 2: shouldSwap = true; break;
+        case 3:
+            if (!pParent->splitTop)
+                shouldSwap = true;
+            pParent->splitTop = !pParent->splitTop;
+            break;
+        default: break; // should never happen
+    }
+
+    if (shouldSwap)
+        std::swap(pParent->children[0], pParent->children[1]);
+
+    pParent->recalcSizePosRecursive();
+}
+
+bool CDwindleAlgorithm::moveToRoot(SP<SDwindleNodeData> x, bool stable) {
+    if (!x || !x->pParent)
+        return false;
+
+    if (x->pTarget->fullscreenMode() != FSMODE_NONE)
+        return false;
+
     // already at root
     if (!x->pParent->pParent)
-        return;
+        return false;
 
     auto& pNode = x->pParent->children[0] == x ? x->pParent->children[0] : x->pParent->children[1];
 
@@ -770,4 +840,6 @@ void CDwindleAlgorithm::moveToRoot(SP<SDwindleNodeData> x, bool stable) {
         std::swap(pRoot->children[0], pRoot->children[1]);
 
     pRoot->recalcSizePosRecursive();
+
+    return true;
 }

@@ -6,6 +6,7 @@
 #include "../../debug/log/Logger.hpp"
 #include "../../desktop/Workspace.hpp"
 #include "../../config/ConfigManager.hpp"
+#include "../../event/EventBus.hpp"
 
 using namespace Layout;
 
@@ -17,6 +18,20 @@ SP<CSpace> CSpace::create(PHLWORKSPACE w) {
 
 CSpace::CSpace(PHLWORKSPACE parent) : m_parent(parent) {
     recheckWorkArea();
+
+    // NOLINTNEXTLINE
+    m_geomUpdateCallback = Event::bus()->m_events.monitor.layoutChanged.listen([this] {
+        // During monitor disconnect/reconnect (e.g. sleep/wake), some workspaces
+        // may have stale or null monitors. Guard against that to avoid crashing
+        // when recalculating layout for workspaces mid-migration.
+        if (!m_parent || !m_parent->m_monitor)
+            return;
+
+        recheckWorkArea();
+
+        if (m_algorithm)
+            m_algorithm->recalculate();
+    });
 }
 
 void CSpace::add(SP<ITarget> t) {
@@ -174,6 +189,11 @@ void CSpace::swap(SP<ITarget> a, SP<ITarget> b) {
 void CSpace::moveTargetInDirection(SP<ITarget> t, Math::eDirection dir, bool silent) {
     if (m_algorithm)
         m_algorithm->moveTargetInDirection(t, dir, silent);
+}
+
+void CSpace::setTargetGeom(const CBox& box, SP<ITarget> target) {
+    if (m_algorithm)
+        m_algorithm->setTargetGeom(box, target);
 }
 
 SP<ITarget> CSpace::getNextCandidate(SP<ITarget> old) {

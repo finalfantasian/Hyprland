@@ -655,6 +655,8 @@ CConfigManager::CConfigManager() {
     registerConfigVar("scrolling:follow_min_visible", Hyprlang::FLOAT{0.4});
     registerConfigVar("scrolling:explicit_column_widths", Hyprlang::STRING{"0.333, 0.5, 0.667, 1.0"});
     registerConfigVar("scrolling:direction", Hyprlang::STRING{"right"});
+    registerConfigVar("scrolling:wrap_focus", Hyprlang::INT{1});
+    registerConfigVar("scrolling:wrap_swapcol", Hyprlang::INT{1});
 
     registerConfigVar("animations:enabled", Hyprlang::INT{1});
     registerConfigVar("animations:workspace_wraparound", Hyprlang::INT{0});
@@ -797,6 +799,8 @@ CConfigManager::CConfigManager() {
     registerConfigVar("render:non_shader_cm", Hyprlang::INT{3});
     registerConfigVar("render:cm_sdr_eotf", {"default"});
     registerConfigVar("render:commit_timing_enabled", Hyprlang::INT{1});
+    registerConfigVar("render:icc_vcgt_enabled", Hyprlang::INT{1});
+    registerConfigVar("render:use_shader_blur_blend", Hyprlang::INT{0});
 
     registerConfigVar("ecosystem:no_update_news", Hyprlang::INT{0});
     registerConfigVar("ecosystem:no_donation_nag", Hyprlang::INT{0});
@@ -871,6 +875,7 @@ CConfigManager::CConfigManager() {
     m_config->addSpecialConfigValue("monitorv2", "min_luminance", Hyprlang::FLOAT{-1.0});
     m_config->addSpecialConfigValue("monitorv2", "max_luminance", Hyprlang::INT{-1});
     m_config->addSpecialConfigValue("monitorv2", "max_avg_luminance", Hyprlang::INT{-1});
+    m_config->addSpecialConfigValue("monitorv2", "icc", Hyprlang::STRING{""});
 
     // windowrule v3
     m_config->addSpecialCategory("windowrule", {.key = "name"});
@@ -1257,6 +1262,10 @@ std::optional<std::string> CConfigManager::handleMonitorv2(const std::string& ou
     if (VAL && VAL->m_bSetByUser)
         parser.rule().maxAvgLuminance = std::any_cast<Hyprlang::INT>(VAL->getValue());
 
+    VAL = m_config->getSpecialConfigValuePtr("monitorv2", "icc", output.c_str());
+    if (VAL && VAL->m_bSetByUser)
+        parser.rule().iccFile = std::any_cast<Hyprlang::STRING>(VAL->getValue());
+
     auto newrule = parser.rule();
 
     std::erase_if(m_monitorRules, [&](const auto& other) { return other.name == newrule.name; });
@@ -1370,7 +1379,7 @@ void CConfigManager::postConfigReload(const Hyprlang::CParseResult& result) {
         g_pInputManager->setTouchDeviceConfigs();
         g_pInputManager->setTabletConfigs();
 
-        g_pHyprOpenGL->m_reloadScreenShader = true;
+        g_pHyprRenderer->m_reloadScreenShader = true;
     }
 
     // parseError will be displayed next frame
@@ -1444,7 +1453,7 @@ void CConfigManager::postConfigReload(const Hyprlang::CParseResult& result) {
 
     for (auto const& m : g_pCompositor->m_monitors) {
         // mark blur dirty
-        g_pHyprOpenGL->markBlurDirtyForMonitor(m);
+        m->m_blurFBDirty = true;
 
         g_pCompositor->scheduleFrameForMonitor(m);
 
@@ -1672,6 +1681,8 @@ SWorkspaceRule CConfigManager::mergeWorkspaceRules(const SWorkspaceRule& rule1, 
             mergedRule.layoutopts[layoutopt.first] = layoutopt.second;
         }
     }
+    if (rule2.animationStyle.has_value())
+        mergedRule.animationStyle = rule2.animationStyle;
     return mergedRule;
 }
 
@@ -1912,7 +1923,6 @@ PHLMONITOR CConfigManager::getBoundMonitorForWS(const std::string& wsname) {
 std::string CConfigManager::getBoundMonitorStringForWS(const std::string& wsname) {
     for (auto const& wr : m_workspaceRules) {
         const auto WSNAME = wr.workspaceName.starts_with("name:") ? wr.workspaceName.substr(5) : wr.workspaceName;
-
         if (WSNAME == wsname)
             return wr.monitor;
     }
@@ -2275,6 +2285,15 @@ bool CMonitorRuleParser::parseVRR(const std::string& value) {
     return true;
 }
 
+bool CMonitorRuleParser::parseICC(const std::string& val) {
+    if (val.empty()) {
+        m_error += "invalid icc ";
+        return false;
+    }
+    m_rule.iccFile = val;
+    return true;
+}
+
 void CMonitorRuleParser::setDisabled() {
     m_rule.disabled = true;
 }
@@ -2368,6 +2387,9 @@ std::optional<std::string> CConfigManager::handleMonitor(const std::string& comm
             argno++;
         } else if (ARGS[argno] == "vrr") {
             parser.parseVRR(std::string(ARGS[argno + 1]));
+            argno++;
+        } else if (ARGS[argno] == "icc") {
+            parser.parseICC(std::string(ARGS[argno + 1]));
             argno++;
         } else if (ARGS[argno] == "workspace") {
             const auto& [id, name, isAutoID] = getWorkspaceIDNameFromString(std::string(ARGS[argno + 1]));
@@ -2521,6 +2543,7 @@ std::optional<std::string> CConfigManager::handleBind(const std::string& command
     bool       click           = false;
     bool       drag            = false;
     bool       submapUniversal = false;
+    bool       isPerDevice     = false;
     const auto BINDARGS        = command.substr(4);
 
     for (auto const& arg : BINDARGS) {
@@ -2545,6 +2568,7 @@ std::optional<std::string> CConfigManager::handleBind(const std::string& command
                 release = true;
                 break;
             case 'u': submapUniversal = true; break;
+            case 'k': isPerDevice = true; break;
             default: return "bind: invalid flag";
         }
     }
@@ -2558,13 +2582,14 @@ std::optional<std::string> CConfigManager::handleBind(const std::string& command
     if (click && drag)
         return "flags c and g are mutually exclusive";
 
-    const int  numbArgs = hasDescription ? 5 : 4;
+    const int  numbArgs = (hasDescription ? 5 : 4) + sc<int>(isPerDevice);
     const auto ARGS     = CVarList(value, numbArgs);
 
-    const int  DESCR_OFFSET = hasDescription ? 1 : 0;
+    const int  DESCR_OFFSET  = hasDescription ? 1 : 0;
+    const int  DEVICE_OFFSET = sc<int>(isPerDevice);
     if ((ARGS.size() < 3 && !mouse) || (ARGS.size() < 3 && mouse))
         return "bind: too few args";
-    else if ((ARGS.size() > sc<size_t>(4) + DESCR_OFFSET && !mouse) || (ARGS.size() > sc<size_t>(3) + DESCR_OFFSET && mouse))
+    else if ((ARGS.size() > sc<size_t>(4) + DESCR_OFFSET + DEVICE_OFFSET && !mouse) || (ARGS.size() > sc<size_t>(3) + DESCR_OFFSET + DEVICE_OFFSET && mouse))
         return "bind: too many args";
 
     std::set<xkb_keysym_t> KEYSYMS;
@@ -2583,11 +2608,13 @@ std::optional<std::string> CConfigManager::handleBind(const std::string& command
 
     const auto KEY = multiKey ? "" : ARGS[1];
 
-    const auto DESCRIPTION = hasDescription ? ARGS[2] : "";
+    const auto DEVICEARGS = isPerDevice ? ARGS[2] : "";
 
-    auto       HANDLER = ARGS[2 + DESCR_OFFSET];
+    const auto DESCRIPTION = hasDescription ? ARGS[2 + DEVICE_OFFSET] : "";
 
-    const auto COMMAND = mouse ? HANDLER : ARGS[3 + DESCR_OFFSET];
+    auto       HANDLER = ARGS[2 + DESCR_OFFSET + DEVICE_OFFSET];
+
+    const auto COMMAND = mouse ? HANDLER : ARGS[3 + DESCR_OFFSET + DEVICE_OFFSET];
 
     if (mouse)
         HANDLER = "mouse";
@@ -2607,6 +2634,16 @@ std::optional<std::string> CConfigManager::handleBind(const std::string& command
         return "Invalid mod, requested mod \"" + MODSTR + "\" is not a valid mod.";
     }
 
+    //[!]keyboard1 keyboard2 ...
+    bool                            deviceInclusive = false;
+    std::unordered_set<std::string> devices         = {};
+    if (!DEVICEARGS.empty()) {
+        deviceInclusive = DEVICEARGS[0] != '!';
+        for (const auto deviceString : std::ranges::views::split(DEVICEARGS.substr(deviceInclusive ? 0 : 1), ' ')) {
+            devices.emplace(std::string_view(deviceString));
+        }
+    }
+
     if ((!KEY.empty()) || multiKey) {
         SParsedKey parsedKey = parseKey(KEY);
 
@@ -2618,7 +2655,7 @@ std::optional<std::string> CConfigManager::handleBind(const std::string& command
         g_pKeybindManager->addKeybind(SKeybind{parsedKey.key, KEYSYMS,      parsedKey.keycode, parsedKey.catchAll, MOD,      MODS,           HANDLER,
                                                COMMAND,       locked,       m_currentSubmap,   DESCRIPTION,        release,  repeat,         longPress,
                                                mouse,         nonConsuming, transparent,       ignoreMods,         multiKey, hasDescription, dontInhibit,
-                                               click,         drag,         submapUniversal});
+                                               click,         drag,         submapUniversal,   deviceInclusive,    devices});
     }
 
     return {};
@@ -2738,6 +2775,9 @@ std::optional<std::string> CConfigManager::handleWorkspaceRules(const std::strin
         } else if ((delim = rule.find("layout:")) != std::string::npos) {
             std::string layout = rule.substr(delim + 7);
             wsRule.layout      = std::move(layout);
+        } else if ((delim = rule.find("animation:")) != std::string::npos) {
+            std::string animationStyle = rule.substr(delim + 10);
+            wsRule.animationStyle      = std::move(animationStyle);
         }
 
         return {};

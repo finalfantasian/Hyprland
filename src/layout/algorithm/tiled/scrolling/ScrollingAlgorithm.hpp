@@ -40,8 +40,8 @@ namespace Layout::Tiled {
         // index of lowest target that is above y.
         size_t                                idxForHeight(float y);
 
-        void                                  up(SP<SScrollingTargetData> w);
-        void                                  down(SP<SScrollingTargetData> w);
+        bool                                  up(SP<SScrollingTargetData> w);
+        bool                                  down(SP<SScrollingTargetData> w);
 
         SP<SScrollingTargetData>              next(SP<SScrollingTargetData> w);
         SP<SScrollingTargetData>              prev(SP<SScrollingTargetData> w);
@@ -137,6 +137,8 @@ namespace Layout::Tiled {
         void                     focusTargetUpdate(SP<ITarget> target);
         void                     moveTargetTo(SP<ITarget> t, Math::eDirection dir, bool silent);
         void                     focusOnInput(SP<ITarget> target, eInputMode input);
+
+        float                    defaultColumnWidth();
 
         friend struct SScrollingData;
     };

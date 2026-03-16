@@ -159,12 +159,6 @@ CWindow::~CWindow() {
     }
 
     m_events.destroy.emit();
-
-    if (!g_pHyprOpenGL)
-        return;
-
-    g_pHyprRenderer->makeEGLCurrent();
-    std::erase_if(g_pHyprOpenGL->m_windowFramebuffers, [&](const auto& other) { return other.first.expired() || other.first.get() == this; });
 }
 
 eViewType CWindow::type() const {
@@ -277,7 +271,7 @@ CBox CWindow::getWindowIdealBoundingBoxIgnoreReserved() {
 
     // fucker fucking fuck
     const auto  WORKAREA = m_workspace->m_space->workArea();
-    const auto& RESERVED = PMONITOR->m_reservedArea;
+    const auto& RESERVED = CReservedArea(PMONITOR->logicalBox(), WORKAREA);
 
     if (DELTALESSTHAN(POS.x, WORKAREA.x, 1)) {
         POS.x -= RESERVED.left();
@@ -509,12 +503,6 @@ void CWindow::moveToWorkspace(PHLWORKSPACE pWorkspace) {
     m_workspace = pWorkspace;
 
     setAnimationsToMove();
-
-    OLDWORKSPACE->updateWindows();
-    OLDWORKSPACE->updateWindowData();
-
-    pWorkspace->updateWindows();
-    pWorkspace->updateWindowData();
 
     g_pCompositor->updateAllWindowsAnimatedDecorationValues();
 
@@ -807,9 +795,13 @@ void CWindow::updateWindowData() {
 }
 
 void CWindow::updateWindowData(const SWorkspaceRule& workspaceRule) {
-    m_ruleApplicator->borderSize().matchOptional(workspaceRule.borderSize, Desktop::Types::PRIORITY_WORKSPACE_RULE);
+    if (workspaceRule.noBorder.value_or(false))
+        m_ruleApplicator->borderSize().matchOptional(std::optional<Hyprlang::INT>(0), Desktop::Types::PRIORITY_WORKSPACE_RULE);
+    else if (workspaceRule.borderSize)
+        m_ruleApplicator->borderSize().matchOptional(workspaceRule.borderSize, Desktop::Types::PRIORITY_WORKSPACE_RULE);
+    else
+        m_ruleApplicator->borderSize().matchOptional(std::nullopt, Desktop::Types::PRIORITY_WORKSPACE_RULE);
     m_ruleApplicator->decorate().matchOptional(workspaceRule.decorate, Desktop::Types::PRIORITY_WORKSPACE_RULE);
-    m_ruleApplicator->borderSize().matchOptional(workspaceRule.noBorder ? std::optional<Hyprlang::INT>(0) : std::nullopt, Desktop::Types::PRIORITY_WORKSPACE_RULE);
     m_ruleApplicator->rounding().matchOptional(workspaceRule.noRounding.value_or(false) ? std::optional<Hyprlang::INT>(0) : std::nullopt, Desktop::Types::PRIORITY_WORKSPACE_RULE);
     m_ruleApplicator->noShadow().matchOptional(workspaceRule.noShadow, Desktop::Types::PRIORITY_WORKSPACE_RULE);
 }
@@ -1727,8 +1719,7 @@ void CWindow::mapWindow() {
         requestedClientFSMode = FSMODE_FULLSCREEN;
     MONITORID requestedFSMonitor = m_wantsInitialFullscreenMonitor;
 
-    m_ruleApplicator->readStaticRules();
-    {
+    auto      setStaticProps = [&]() {
         if (!m_ruleApplicator->static_.monitor.empty()) {
             const auto& MONITORSTR = m_ruleApplicator->static_.monitor;
             if (MONITORSTR == "unset")
@@ -1779,8 +1770,8 @@ void CWindow::mapWindow() {
 
         if (m_ruleApplicator->static_.fullscreenStateClient || m_ruleApplicator->static_.fullscreenStateInternal) {
             requestedFSState = Desktop::View::SFullscreenState{
-                .internal = sc<eFullscreenMode>(m_ruleApplicator->static_.fullscreenStateInternal.value_or(0)),
-                .client   = sc<eFullscreenMode>(m_ruleApplicator->static_.fullscreenStateClient.value_or(0)),
+                     .internal = sc<eFullscreenMode>(m_ruleApplicator->static_.fullscreenStateInternal.value_or(0)),
+                     .client   = sc<eFullscreenMode>(m_ruleApplicator->static_.fullscreenStateClient.value_or(0)),
             };
         }
 
@@ -1854,6 +1845,13 @@ void CWindow::mapWindow() {
 
         if (m_ruleApplicator->static_.noCloseFor)
             m_closeableSince = Time::steadyNow() + std::chrono::milliseconds(m_ruleApplicator->static_.noCloseFor.value());
+    };
+
+    const bool recheck = m_ruleApplicator->readStaticRules();
+    setStaticProps();
+    if (recheck) {
+        m_ruleApplicator->recheckStaticRules();
+        setStaticProps();
     }
 
     // make it uncloseable if it's a Hyprland dialog
@@ -1873,11 +1871,12 @@ void CWindow::mapWindow() {
         if (WORKSPACEARGS.contains("silent"))
             workspaceSilent = true;
 
-        if (WORKSPACEARGS.contains("empty") && PWORKSPACE->getWindows() <= 1) {
+        auto joined = WORKSPACEARGS.join(" ", 0, workspaceSilent ? WORKSPACEARGS.size() - 1 : 0);
+        if (joined.starts_with("empty") && PWORKSPACE->getWindows() == 0) {
             requestedWorkspaceID   = PWORKSPACE->m_id;
             requestedWorkspaceName = PWORKSPACE->m_name;
         } else {
-            auto result            = getWorkspaceIDNameFromString(WORKSPACEARGS.join(" ", 0, workspaceSilent ? WORKSPACEARGS.size() - 1 : 0));
+            auto result            = getWorkspaceIDNameFromString(joined);
             requestedWorkspaceID   = result.id;
             requestedWorkspaceName = result.name;
         }
@@ -1949,11 +1948,13 @@ void CWindow::mapWindow() {
     g_pEventManager->postEvent(SHyprIPCEvent{"openwindow", std::format("{:x},{},{},{}", m_self.lock(), PWORKSPACE->m_name, m_class, m_title)});
     Event::bus()->m_events.window.openEarly.emit(m_self.lock());
 
-    if (*PAUTOGROUP                                                              // auto_group enabled
-        && Desktop::focusState()->window()                                       // focused window exists
-        && canBeGroupedInto(Desktop::focusState()->window()->m_group)            // we can group
-        && Desktop::focusState()->window()->m_workspace == m_workspace           // workspaces match, we're not opening on another ws
-        && !isModal() && !(parent() && m_isFloating) && !isX11OverrideRedirect() // not a modal, floating child or X11 OR
+    if (*PAUTOGROUP                                                                        // auto_group enabled
+        && Desktop::focusState()->window()                                                 // focused window exists
+        && canBeGroupedInto(Desktop::focusState()->window()->m_group)                      // we can group
+        && Desktop::focusState()->window()->m_workspace == m_workspace                     // workspaces match, we're not opening on another ws
+        && !g_pXWaylandManager->shouldBeFloated(m_self.lock()) && !isX11OverrideRedirect() // not a window that should float or X11
+        && !(m_isFloating && !Desktop::focusState()->window()->m_isFloating)               // do not auto-group a floated window into a tiled group
+        && !isModal()                                                                      // no modal grouping
     ) {
         // add to group if we are focused on one
         Desktop::focusState()->window()->m_group->add(m_self.lock());

@@ -39,7 +39,7 @@ namespace Layout::Tiled {
 
         std::optional<Vector2D> m_overrideFocalPoint; // for onWindowCreatedTiling.
 
-        void                    addTarget(SP<ITarget> target, bool newTarget = true);
+        void                    addTarget(SP<ITarget> target);
         void                    calculateWorkspace();
         SP<SDwindleNodeData>    getNodeFromTarget(SP<ITarget>);
         SP<SDwindleNodeData>    getNodeFromWindow(PHLWINDOW w);
@@ -48,9 +48,10 @@ namespace Layout::Tiled {
         SP<SDwindleNodeData>    getClosestNode(const Vector2D&, SP<ITarget> skip = nullptr);
         SP<SDwindleNodeData>    getMasterNode();
 
-        void                    toggleSplit(SP<SDwindleNodeData>);
-        void                    swapSplit(SP<SDwindleNodeData>);
-        void                    moveToRoot(SP<SDwindleNodeData>, bool stable = true);
+        bool                    toggleSplit(SP<SDwindleNodeData>);
+        bool                    swapSplit(SP<SDwindleNodeData>);
+        void                    rotateSplit(SP<SDwindleNodeData>, int angle = 90);
+        bool                    moveToRoot(SP<SDwindleNodeData>, bool stable = true);
 
         Math::eDirection        m_overrideDirection = Math::DIRECTION_DEFAULT;
     };

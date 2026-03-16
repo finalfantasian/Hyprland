@@ -58,15 +58,15 @@ bool CDragStateController::updateDragWindow() {
     m_draggingTiled                   = false;
     m_draggingWindowOriginalFloatSize = DRAGGINGTARGET->lastFloatingSize();
 
-    if (WAS_FULLSCREEN && DRAGGINGTARGET->floating()) {
+    if (WAS_FULLSCREEN && DRAGGINGTARGET->floating() && m_dragThresholdReached) {
         const auto MOUSECOORDS = g_pInputManager->getMouseCoordsInternal();
         DRAGGINGTARGET->setPositionGlobal(CBox{MOUSECOORDS - DRAGGINGTARGET->position().size() / 2.F, DRAGGINGTARGET->position().size()});
     } else if (!DRAGGINGTARGET->floating() && m_dragMode == MBIND_MOVE) {
         Vector2D MINSIZE = DRAGGINGTARGET->minSize().value_or(Vector2D{MIN_WINDOW_SIZE, MIN_WINDOW_SIZE});
         DRAGGINGTARGET->rememberFloatingSize((DRAGGINGTARGET->position().size() * 0.8489).clamp(MINSIZE, Vector2D{}).floor());
-        DRAGGINGTARGET->setPositionGlobal(CBox{g_pInputManager->getMouseCoordsInternal() - DRAGGINGTARGET->position().size() / 2.F, DRAGGINGTARGET->position().size()});
 
         if (m_dragThresholdReached) {
+            DRAGGINGTARGET->setPositionGlobal(CBox{g_pInputManager->getMouseCoordsInternal() - DRAGGINGTARGET->position().size() / 2.F, DRAGGINGTARGET->position().size()});
             g_layoutManager->changeFloatingMode(DRAGGINGTARGET);
             m_draggingTiled = true;
         }
@@ -204,32 +204,6 @@ void CDragStateController::dragEnd() {
     }
 
     if (m_draggingTiled) {
-        // static auto PPRECISEMOUSE = CConfigValue<Hyprlang::INT>("dwindle:precise_mouse_move");
-
-        // FIXME: remove or rethink
-        // if (*PPRECISEMOUSE) {
-        //     eDirection      direction = DIRECTION_DEFAULT;
-
-        //     const auto      MOUSECOORDS = g_pInputManager->getMouseCoordsInternal();
-        //     const PHLWINDOW pReferenceWindow =
-        //         g_pCompositor->vectorToWindowUnified(MOUSECOORDS, Desktop::View::RESERVED_EXTENTS | Desktop::View::INPUT_EXTENTS | Desktop::View::ALLOW_FLOATING, DRAGGINGWINDOW);
-
-        //     if (pReferenceWindow && pReferenceWindow != DRAGGINGWINDOW) {
-        //         const Vector2D draggedCenter   = DRAGGINGWINDOW->m_realPosition->goal() + DRAGGINGWINDOW->m_realSize->goal() / 2.f;
-        //         const Vector2D referenceCenter = pReferenceWindow->m_realPosition->goal() + pReferenceWindow->m_realSize->goal() / 2.f;
-        //         const float    xDiff           = draggedCenter.x - referenceCenter.x;
-        //         const float    yDiff           = draggedCenter.y - referenceCenter.y;
-
-        //         if (fabs(xDiff) > fabs(yDiff))
-        //             direction = xDiff < 0 ? DIRECTION_LEFT : DIRECTION_RIGHT;
-        //         else
-        //             direction = yDiff < 0 ? DIRECTION_UP : DIRECTION_DOWN;
-        //     }
-
-        //     onWindowRemovedTiling(DRAGGINGWINDOW);
-        //     onWindowCreatedTiling(DRAGGINGWINDOW, direction);
-        // } else
-
         // make sure to check if we are floating because drag into group could make us tiled already
         if (draggingTarget->floating())
             g_layoutManager->changeFloatingMode(draggingTarget);
@@ -238,6 +212,8 @@ void CDragStateController::dragEnd() {
     }
 
     draggingTarget->damageEntire();
+
+    g_layoutManager->setTargetGeom(draggingTarget->position(), draggingTarget);
 
     Desktop::focusState()->fullWindowFocus(draggingTarget->window(), Desktop::FOCUS_REASON_DESKTOP_STATE_CHANGE);
 
