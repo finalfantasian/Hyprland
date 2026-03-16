@@ -1330,7 +1330,7 @@ WP<CShader> CHyprOpenGLImpl::renderToFBInternal(SP<ITexture> tex, const STexture
                 (SOURCE_IMAGE_DESCRIPTION->value().luminances.max > 0 ? SOURCE_IMAGE_DESCRIPTION->value().luminances.max : SOURCE_IMAGE_DESCRIPTION->value().luminances.reference);
             const auto  dstMaxLuminance = TARGET_IMAGE_DESCRIPTION->value().luminances.max > 0 ? TARGET_IMAGE_DESCRIPTION->value().luminances.max : 10000;
 
-            if (settings.needsTonemap)
+            if (maxLuminance >= dstMaxLuminance * 1.01)
                 shaderFeatures |= SH_FEAT_TONEMAP;
 
             if (!data.finalMonitorCM && settings.needsSDRmod)
