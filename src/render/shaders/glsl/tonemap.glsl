@@ -37,34 +37,41 @@ const mat3 ICtCpPQInv = mat3(                                                //
 // ) / 4096.0);
 // const mat3 ICtCpHLGInv = inverse(ICtCpHLG);
 
-vec4 tonemap(vec4 color, mat3 dstXYZ, float maxLuminance, float dstMaxLuminance, float dstRefLuminance, float srcRefLuminance) {
-    if (maxLuminance < dstMaxLuminance * 1.01)
-        return vec4(clamp(color.rgb, vec3(0.0), vec3(dstMaxLuminance)), color[3]);
+vec4 tonemap(vec4 color, mat3 dstXYZ, float maxLuminance, float dstMaxLuminance, float dstRefLuminance)
+{
+    if (maxLuminance <= dstMaxLuminance * 1.001)
+        return vec4(clamp(color.rgb, vec3(0.0), vec3(dstMaxLuminance)), color.a);
 
-    mat3  toLMS   = BT2020toLMS * dstXYZ;
-    mat3  fromLMS = inverse(dstXYZ) * LMStoBT2020;
+    mat3 toLMS   = BT2020toLMS * dstXYZ;
+    mat3 fromLMS = inverse(dstXYZ) * LMStoBT2020;
 
-    vec3  lms   = fromLinear(vec4((toLMS * color.rgb) / HDR_MAX_LUMINANCE, 1.0), CM_TRANSFER_FUNCTION_ST2084_PQ).rgb;
-    vec3  ICtCp = ICtCpPQ * lms;
+    vec3 lms = fromLinear(
+        vec4((toLMS * color.rgb) / HDR_MAX_LUMINANCE, 1.0),
+        CM_TRANSFER_FUNCTION_ST2084_PQ
+    ).rgb;
 
-    float E         = pow(clamp(ICtCp[0], 0.0, 1.0), PQ_INV_M2);
-    float luminance = pow((max(E - PQ_C1, 0.0)) / (PQ_C2 - PQ_C3 * E), PQ_INV_M1) * HDR_MAX_LUMINANCE;
+    vec3 ICtCp = ICtCpPQ * lms;
 
-    float linearPart         = min(luminance, dstRefLuminance);
-    float luminanceAboveRef  = max(luminance - dstRefLuminance, 0.0);
-    float maxExcessLuminance = max(maxLuminance - dstRefLuminance, 1.0);
-    float shoulder           = log((luminanceAboveRef / maxExcessLuminance + 1.0) * (M_E - 1.0));
-    float mappedHigh         = shoulder * (dstMaxLuminance - dstRefLuminance);
-    float newLum             = clamp(linearPart + mappedHigh, 0.0, dstMaxLuminance);
+    float srcScale  = maxLuminance / dstRefLuminance;
+    float dstScale = dstMaxLuminance / dstRefLuminance;
+    float v = (dstScale * (1.0 + srcScale) - srcScale) / (srcScale * srcScale);
 
-    // scale src to dst reference
-    float refScale = dstRefLuminance / srcRefLuminance;
+    float luminance = toLinear(
+        vec4(ICtCp.x, 0.0, 0.0, 1.0),
+        CM_TRANSFER_FUNCTION_ST2084_PQ
+    ).x * HDR_MAX_LUMINANCE;
 
-    // kind of works but doesn't use newLum at all
-    return vec4(fromLMS * toLinear(vec4(ICtCpPQInv * ICtCp, 1.0), CM_TRANSFER_FUNCTION_ST2084_PQ).rgb * HDR_MAX_LUMINANCE * refScale, color[3]);
-    // breaks with overriden monitor luminances. might be caused by incorrect imput values
-    // @gulafaran
-    // vec3 outRGB = fromLMS * toLinear(vec4(ICtCpPQInv * ICtCp, 1.0), CM_TRANSFER_FUNCTION_ST2084_PQ).rgb;
-    // outRGB *= (newLum / max(luminance, 0.0001)); // actually apply the tone mapping
-    // return vec4(clamp(outRGB * HDR_MAX_LUMINANCE * refScale, 0.0, dstMaxLuminance), color[3]);
+    float luminanceRatio = max(luminance / dstRefLuminance, 0.0);
+    luminanceRatio = luminanceRatio * (1.0 + luminanceRatio * v) / (1.0 + luminanceRatio);
+
+    float mappedLuminance = luminanceRatio * dstRefLuminance;
+    ICtCp.x = fromLinear(
+        vec4(mappedLuminance / HDR_MAX_LUMINANCE, 0.0, 0.0, 1.0),
+        CM_TRANSFER_FUNCTION_ST2084_PQ
+    ).x;
+
+    return vec4(
+        fromLMS * toLinear(vec4(ICtCpPQInv * ICtCp, 1.0), CM_TRANSFER_FUNCTION_ST2084_PQ).rgb * HDR_MAX_LUMINANCE,
+        color.a
+    );
 }

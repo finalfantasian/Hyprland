@@ -234,7 +234,7 @@ vec4
     pixColor     = toNit(pixColor, srcTFRange);
     pixColor.rgb *= pixColor.a;
 #if USE_TONEMAP
-    pixColor = tonemap(pixColor, dstxyz, maxLuminance, dstMaxLuminance, dstRefLuminance, srcRefLuminance);
+    pixColor = tonemap(pixColor, dstxyz, maxLuminance, dstMaxLuminance, dstRefLuminance);
 #endif
 #if USE_MIRROR
     // TODO HDR -> SDR tonemap
