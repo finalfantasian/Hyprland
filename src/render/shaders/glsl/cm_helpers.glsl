@@ -8,6 +8,12 @@
 #include "defines.h"
 #include "constants.h"
 
+uniform vec3 srcLumaCoeffs;
+uniform vec3 dstLumaCoeffs;
+#if USE_MIRROR
+uniform mat3 captureMatrix;
+#endif
+
 #if USE_SDR_MOD
 vec4 saturate(vec4 color, mat3 primaries, float saturation) {
     if (saturation == 1.0)
@@ -41,11 +47,14 @@ vec3 tfInvPQ(vec3 color) {
     return pow((max(E - PQ_C1, vec3(0.0))) / (PQ_C2 - PQ_C3 * E), vec3(PQ_INV_M1));
 }
 
-vec3 tfInvHLG(vec3 color) {
+vec3 tfInvHLG(vec3 color, vec3 lumaCoeffs) {
     bvec3 isLow = lessThanEqual(color.rgb, vec3(HLG_E_CUT));
     vec3  lo    = color.rgb * color.rgb / 3.0;
     vec3  hi    = (exp((color.rgb - HLG_C) / HLG_A) + HLG_B) / 12.0;
-    return mix(hi, lo, isLow);
+    vec3  scene = mix(hi, lo, isLow);
+    // BT.2100 reference-display OOTF, gamma 1.2 at 1000 nits.
+    float Y = dot(scene, lumaCoeffs);
+    return scene * pow(max(Y, 0.0), 0.2);
 }
 
 // Many transfer functions (including sRGB) follow the same pattern: a linear
@@ -89,6 +98,11 @@ vec3 tfPQ(vec3 color) {
 }
 
 vec3 tfHLG(vec3 color) {
+    // Undo the reference-display OOTF before applying the OETF.
+    float Y = dot(color, dstLumaCoeffs);
+    if (Y <= 0.0)
+        return vec3(0.0);
+    color *= pow(Y, -1.0 / 6.0);
     bvec3 isLow = lessThanEqual(color.rgb, vec3(HLG_D_CUT));
     vec3  lo    = sqrt(max(color.rgb, vec3(0.0)) * 3.0);
     vec3  hi    = HLG_A * log(max(12.0 * color.rgb - HLG_B, vec3(0.0001))) + HLG_C;
@@ -132,7 +146,7 @@ vec3 toLinearRGB(vec3 color, int tf) {
         case CM_TRANSFER_FUNCTION_ST2084_PQ: return tfInvPQ(color);
         case CM_TRANSFER_FUNCTION_GAMMA22: return pow(max(color, vec3(0.0)), vec3(2.2));
         case CM_TRANSFER_FUNCTION_GAMMA28: return pow(max(color, vec3(0.0)), vec3(2.8));
-        case CM_TRANSFER_FUNCTION_HLG: return tfInvHLG(color);
+        case CM_TRANSFER_FUNCTION_HLG: return tfInvHLG(color, srcLumaCoeffs);
         case CM_TRANSFER_FUNCTION_EXT_SRGB: return tfInvExtSRGB(color);
         case CM_TRANSFER_FUNCTION_BT1886: return tfInvBT1886(color);
         case CM_TRANSFER_FUNCTION_ST240: return tfInvST240(color);
@@ -200,6 +214,36 @@ vec4 fromLinearNit(vec4 color, int tf, vec2 range) {
     return color;
 }
 
+#if USE_MIRROR || USE_SDR_CAPTURE
+vec4 captureToSRGB(vec4 captureColor, int srcTF, vec2 srcTFRange, float srcRefLuminance, float captureMaxLuminance) {
+    // HDR clients encode SDR white at their reference luminance, not necessarily 80 nits.
+    vec2 mirrorRange = vec2(SDR_MIN_LUMINANCE, SDR_MAX_LUMINANCE);
+    if (srcTF == CM_TRANSFER_FUNCTION_GAMMA22 || srcTF == CM_TRANSFER_FUNCTION_SRGB || srcTF == CM_TRANSFER_FUNCTION_ST2084_PQ ||
+        srcTF == CM_TRANSFER_FUNCTION_HLG || srcTF == CM_TRANSFER_FUNCTION_EXT_LINEAR || srcTF == CM_TRANSFER_FUNCTION_EXT_SRGB)
+        mirrorRange = vec2(srcTFRange.x, srcRefLuminance > srcTFRange.x ? srcRefLuminance : srcTFRange.x + SDR_MAX_LUMINANCE);
+
+    captureColor.rgb -= mirrorRange.x * captureColor.a;
+    float captureSpan = mirrorRange.y - mirrorRange.x;
+    float peak = (captureMaxLuminance - mirrorRange.x) / captureSpan;
+    // Gamma/sRGB descriptions can also reserve encoding headroom above reference white.
+    bool hdrCapture = srcTFRange.y > mirrorRange.y || srcTF == CM_TRANSFER_FUNCTION_ST2084_PQ || srcTF == CM_TRANSFER_FUNCTION_HLG ||
+                      srcTF == CM_TRANSFER_FUNCTION_EXT_LINEAR || srcTF == CM_TRANSFER_FUNCTION_EXT_SRGB;
+    if (hdrCapture && peak > 1.01 && captureColor.a > 0.0) {
+        // Keep shadows and midtones unchanged. A continuous shoulder reserves SDR
+        // headroom for HDR highlights; scaling RGB together preserves their hue.
+        float channelMax = max(max(captureColor.r, captureColor.g), captureColor.b) / (captureColor.a * captureSpan);
+        const float KNEE = 0.75;
+        if (channelMax > KNEE) {
+            float x = min(channelMax, peak) - KNEE;
+            float shoulder = 1.0 / (1.0 - KNEE) - 1.0 / (peak - KNEE);
+            float mapped = KNEE + x / (1.0 + shoulder * x);
+            captureColor.rgb *= mapped / channelMax;
+        }
+    }
+    return fromLinearNit(captureColor, CM_TRANSFER_FUNCTION_SRGB, vec2(0.0, captureSpan));
+}
+#endif
+
 #if USE_TONEMAP
 #include "tonemap.glsl"
 #endif
@@ -210,6 +254,14 @@ vec4[2]
 vec4
 #endif
     doColorManagement(vec4 pixColor, float additionalAlpha, int srcTF, int dstTF, mat3 convertMatrix, vec2 srcTFRange, vec2 dstTFRange, float linearNoise
+#if USE_TONEMAP || USE_MIRROR || USE_SDR_CAPTURE
+                       ,
+                       float srcRefLuminance
+#endif
+#if USE_MIRROR || USE_SDR_CAPTURE
+                       ,
+                       float captureMaxLuminance
+#endif
 #if USE_ICC
                       ,
                       highp sampler3D iccLut3D, float iccLutSize
@@ -220,7 +272,7 @@ vec4
 #endif
 #if USE_TONEMAP
                        ,
-                       float maxLuminance, float dstMaxLuminance, float dstRefLuminance, float srcRefLuminance, int tonemapMode
+                       float maxLuminance, float dstMaxLuminance, float dstRefLuminance, int tonemapMode
 #endif
 #if USE_SDR_MOD
                        ,
@@ -245,19 +297,25 @@ vec4
         pixColor = toNit(pixColor, srcTFRange);
     pixColor.a   = finalAlpha;
     pixColor.rgb *= pixColor.a;
+#if USE_MIRROR || USE_SDR_CAPTURE
+    // Capture before monitor tone mapping.
+    vec4 captureColor = pixColor;
+#if USE_MIRROR
+    captureColor.rgb = captureMatrix * captureColor.rgb;
+#endif
+    vec4 mirrorColor = captureToSRGB(captureColor, srcTF, srcTFRange, srcRefLuminance, captureMaxLuminance);
+#endif
+#if USE_SDR_CAPTURE
+    pixColor = mirrorColor;
+#else
 #if USE_TONEMAP
     pixColor = tonemap(pixColor, dstxyz, maxLuminance, dstMaxLuminance, dstRefLuminance, srcRefLuminance, tonemapMode);
-#endif
-
-#if USE_MIRROR
-    // TODO HDR -> SDR tonemap
-    vec4 mirrorColor = fromLinearNit(pixColor, CM_TRANSFER_FUNCTION_SRGB,
-                                     srcTF == CM_TRANSFER_FUNCTION_GAMMA22 || srcTF == CM_TRANSFER_FUNCTION_SRGB ? srcTFRange : vec2(SDR_MIN_LUMINANCE, SDR_MAX_LUMINANCE));
 #endif
     pixColor = fromLinearNit(pixColor, dstTF, dstTFRange);
 #if USE_SDR_MOD
     pixColor = saturate(pixColor, dstxyz, sdrSaturation);
     pixColor.rgb *= sdrBrightnessMultiplier;
+#endif
 #endif
 #endif
 

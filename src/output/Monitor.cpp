@@ -67,6 +67,7 @@
 #include <ranges>
 #include <vector>
 #include <algorithm>
+#include <cmath>
 
 using namespace Hyprutils::String;
 using namespace Hyprutils::Utils;
@@ -585,8 +586,8 @@ void CMonitor::applyCMType(NCMType::eCMType cmType, NTransferFunction::eTF cmSdr
                                                           .primariesNamed      = NColorManagement::CM_PRIMARIES_BT2020,
                                                           .primaries           = NColorManagement::getPrimaries(NColorManagement::CM_PRIMARIES_BT2020),
                                                           .masteringPrimaries  = masteringPrimaries,
-                                                          .luminances          = {.min       = DEFAULT_HDR_IMAGE_DESCRIPTION->value().getTFMinLuminance(),
-                                                                                  .max       = DEFAULT_HDR_IMAGE_DESCRIPTION->value().getTFMaxLuminance(),
+                                                          .luminances          = {.min       = DEFAULT_HDR_IMAGE_DESCRIPTION->value().getDefaultTFMinLuminance(),
+                                                                                  .max       = DEFAULT_HDR_IMAGE_DESCRIPTION->value().getDefaultTFMaxLuminance(),
                                                                                   .reference = DEFAULT_HDR_IMAGE_DESCRIPTION->value().getTFRefLuminance()},
                                                           .masteringLuminances = masteringLuminances,
                                                           .maxCLL              = maxCLL,
@@ -599,8 +600,8 @@ void CMonitor::applyCMType(NCMType::eCMType cmType, NTransferFunction::eTF cmSdr
                  .primariesNamed   = NColorManagement::CM_PRIMARIES_BT2020,
                  .primaries = m_output->parsedEDID.chromaticityCoords.has_value() ? masteringPrimaries : NColorManagement::getPrimaries(NColorManagement::CM_PRIMARIES_BT2020),
                  .masteringPrimaries  = masteringPrimaries,
-                 .luminances          = {.min       = DEFAULT_HDR_IMAGE_DESCRIPTION->value().getTFMinLuminance(),
-                                         .max       = DEFAULT_HDR_IMAGE_DESCRIPTION->value().getTFMaxLuminance(),
+                 .luminances          = {.min       = DEFAULT_HDR_IMAGE_DESCRIPTION->value().getDefaultTFMinLuminance(),
+                                         .max       = DEFAULT_HDR_IMAGE_DESCRIPTION->value().getDefaultTFMaxLuminance(),
                                          .reference = DEFAULT_HDR_IMAGE_DESCRIPTION->value().getTFRefLuminance()},
                  .masteringLuminances = masteringLuminances,
                  .maxCLL              = maxCLL,
@@ -626,6 +627,8 @@ void CMonitor::applyCMType(NCMType::eCMType cmType, NTransferFunction::eTF cmSdr
 }
 
 bool CMonitor::applyMonitorRuleSoft(Config::CMonitorRule&& pMonitorRule) {
+    const auto OLD_PREFERRED_DESCRIPTION = preferredClientImageDescription();
+
     m_activeMonitorRule = std::move(pMonitorRule);
     m_reservedArea.setStatic(m_activeMonitorRule.m_reservedArea);
     m_transform         = m_activeMonitorRule.m_transform;
@@ -653,6 +656,9 @@ bool CMonitor::applyMonitorRuleSoft(Config::CMonitorRule&& pMonitorRule) {
         m_maxLuminance    = m_activeMonitorRule.m_maxLuminance;
         m_maxAvgLuminance = m_activeMonitorRule.m_maxAvgLuminance;
 
+        if (m_sdrMaxLuminance <= 0)
+            m_sdrMaxLuminance = inferredSdrMaxLuminance();
+
         applyCMType(m_cmType, m_sdrEotf);
 
         m_sdrSaturation = m_activeMonitorRule.m_sdrSaturation;
@@ -670,6 +676,12 @@ bool CMonitor::applyMonitorRuleSoft(Config::CMonitorRule&& pMonitorRule) {
                 m_imageDescription = CImageDescription::from(SImageDescription{});
             }
         }
+    }
+
+    if (OLD_PREFERRED_DESCRIPTION != preferredClientImageDescription()) {
+        m_blurFBDirty = true;
+        if (PROTO::colorManagement)
+            PROTO::colorManagement->onPreferredImageDescriptionChanged();
     }
 
     Vector2D xfmd     = m_transform % 2 == 1 ? Vector2D{m_pixelSize.y, m_pixelSize.x} : m_pixelSize;
@@ -2380,6 +2392,39 @@ float CMonitor::maxCLL() {
     return m_maxLuminance >= 0 ? m_maxLuminance : (m_output->parsedEDID.hdrMetadata.has_value() ? m_output->parsedEDID.hdrMetadata->desiredContentMaxLuminance : 0);
 }
 
+int CMonitor::inferredSdrMaxLuminance() {
+    const int FALL = sc<int>(std::lround(maxFALL()));
+    if (FALL <= 0)
+        return sc<int>(HDR_REF_LUMINANCE);
+    return std::clamp(FALL, 200, 500);
+}
+
+PImageDescription CMonitor::preferredClientImageDescription() {
+    const auto& DESC = m_imageDescription->value();
+    const bool  HDR_LIKE =
+        DESC.transferFunction == CM_TRANSFER_FUNCTION_ST2084_PQ || DESC.transferFunction == CM_TRANSFER_FUNCTION_HLG || DESC.transferFunction == CM_TRANSFER_FUNCTION_EXT_LINEAR;
+    if (!HDR_LIKE)
+        return m_imageDescription;
+
+    // Advertise the compositor blending encoding, not the PQ wire format.
+    // Hyprland composites SDR in sRGB-primaries; keeping BT.2020/EDID here makes Chromium
+    // tag wide-gamut on sRGB UI pixels, which desaturates after the extra matrix.
+    // max == reference so encoded 1.0 is SDR white, matching toNit(sdr_max_luminance).
+    const int         SDR_WHITE     = m_sdrMaxLuminance > 0 ? m_sdrMaxLuminance : inferredSdrMaxLuminance();
+    SImageDescription preferred     = DESC;
+    preferred.transferFunction      = CM_TRANSFER_FUNCTION_GAMMA22;
+    preferred.transferFunctionPower = 1.0f;
+    preferred.primariesNameSet      = true;
+    preferred.primariesNamed        = CM_PRIMARIES_SRGB;
+    preferred.primaries             = NColorPrimaries::BT709;
+    preferred.luminances            = {.min = 0, .max = sc<uint32_t>(SDR_WHITE), .reference = sc<uint32_t>(SDR_WHITE)};
+    // Drop the HDR mastering metadata: next to SDR white it reads as headroom and clients dim SDR content to make room.
+    preferred.masteringLuminances = {};
+    preferred.maxCLL              = 0;
+    preferred.maxFALL             = 0;
+    return CImageDescription::from(preferred);
+}
+
 bool CMonitor::wantsWideColor() {
     return supportsWideColor() && (wantsHDR() || m_imageDescription->value().primariesNamed == CM_PRIMARIES_BT2020);
 }
@@ -2666,7 +2711,8 @@ bool CMonitor::needsUnmodifiedCopy() {
     const bool HAS_MODS = m_sdrMinLuminance != SDR_MIN_LUMINANCE || m_sdrMaxLuminance != SDR_MAX_LUMINANCE || (m_sdrBrightness > 0 && m_sdrBrightness != 1.0) ||
         (m_sdrSaturation > 0 && m_sdrSaturation != 1.0);
 
-    if (!HAS_MODS)
+    // Auto still needs HDR capture conversion when SDR controls are unchanged.
+    if (!HAS_MODS && *PKEEP != 2)
         return false;
 
     // TODO handle some FP16 cases

@@ -775,6 +775,24 @@ class CRenderLifecycleTest : public CDMABUFBufferTest {
     UP<Config::CConfigWatcher>           m_previousWatcher;
 };
 
+TEST_F(CRenderLifecycleTest, PreferredSDRDescriptionOmitsHDRMetadata) {
+    using namespace NColorManagement;
+    auto desc                     = DEFAULT_HDR_IMAGE_DESCRIPTION->value();
+    desc.masteringLuminances      = {.min = HDR_MIN_LUMINANCE, .max = 1060};
+    desc.maxCLL                   = 1060;
+    desc.maxFALL                  = 400;
+    m_monitor->m_imageDescription = CImageDescription::from(desc);
+    m_monitor->m_sdrMaxLuminance  = 203;
+
+    const auto& PREFERRED = m_monitor->preferredClientImageDescription()->value();
+    EXPECT_EQ(PREFERRED.transferFunction, CM_TRANSFER_FUNCTION_GAMMA22);
+    EXPECT_EQ(PREFERRED.luminances.max, 203u);
+    EXPECT_EQ(PREFERRED.luminances.reference, 203u);
+    EXPECT_EQ(PREFERRED.masteringLuminances.max, 0u);
+    EXPECT_EQ(PREFERRED.maxCLL, 0u);
+    EXPECT_EQ(PREFERRED.maxFALL, 0u);
+}
+
 TEST_F(CRenderLifecycleTest, IsolatedBlurSelectionNeverReadsOrCompletesMonitorBlur) {
     const auto monitorResources = m_monitor->resources();
     const auto monitorTexture   = monitorResources->m_blurFB->getTexture();
@@ -1613,3 +1631,66 @@ TEST_P(CMesaDMABUFRejectedTest, ClosesIncomingPrimeFD) {
 
 INSTANTIATE_TEST_SUITE_P(InvalidDimensionsAndOffset, CMesaDMABUFRejectedTest,
                          ::testing::Values(std::array<int32_t, 3>{0, 1, 0}, std::array<int32_t, 3>{1, 0, 0}, std::array<int32_t, 3>{1, 1, -1}));
+
+TEST_F(CRenderLifecycleTest, ColorManagementPreservesDeclaredRangeOnHDR) {
+    using namespace NColorManagement;
+    auto& ctx                     = renderer().context();
+    ctx.m_data.pMonitor           = m_monitor;
+    m_monitor->m_imageDescription = DEFAULT_HDR_IMAGE_DESCRIPTION;
+    const auto TARGET             = LINEAR_IMAGE_DESCRIPTION->with({.min = 0, .max = 1000, .reference = 203});
+    for (auto tf : {CM_TRANSFER_FUNCTION_SRGB, CM_TRANSFER_FUNCTION_GAMMA22, CM_TRANSFER_FUNCTION_EXT_LINEAR}) {
+        SCOPED_TRACE(sc<int>(tf));
+        const auto SOURCE   = CImageDescription::from({
+            .transferFunction = tf,
+            .luminances       = {.min = 0, .max = 600, .reference = 203},
+        });
+        const auto SETTINGS = renderer().getCMSettings(ctx, SOURCE, TARGET, nullptr, true, 0, 203);
+        EXPECT_FLOAT_EQ(SETTINGS.srcTFRange.min, 0.0f);
+        EXPECT_FLOAT_EQ(SETTINGS.srcTFRange.max, 600.0f);
+        EXPECT_FLOAT_EQ(SETTINGS.srcRefLuminance, 203.0f);
+        EXPECT_FLOAT_EQ(SETTINGS.maxLuminance, 600.0f);
+    }
+}
+
+TEST_F(CRenderLifecycleTest, ColorManagementMapsSDRBlackAndReferenceWhite) {
+    using namespace NColorManagement;
+    auto& ctx                     = renderer().context();
+    ctx.m_data.pMonitor           = m_monitor;
+    m_monitor->m_imageDescription = DEFAULT_HDR_IMAGE_DESCRIPTION;
+    const auto TARGET             = LINEAR_IMAGE_DESCRIPTION->with({.min = 0, .max = 1000, .reference = 203});
+    for (auto tf : {CM_TRANSFER_FUNCTION_SRGB, CM_TRANSFER_FUNCTION_GAMMA22}) {
+        const auto  SOURCE   = CImageDescription::from({
+            .transferFunction = tf,
+            .luminances       = {.min = 0.2f, .max = 600, .reference = 100},
+        });
+        const auto  SETTINGS = renderer().getCMSettings(ctx, SOURCE, TARGET, nullptr, true, 0.1f, 250);
+        const float WHITE    = (100.0f - 0.2f) / (600.0f - 0.2f);
+        EXPECT_FLOAT_EQ(SETTINGS.srcTFRange.min, 0.1f);
+        EXPECT_NEAR(SETTINGS.srcTFRange.min + WHITE * (SETTINGS.srcTFRange.max - SETTINGS.srcTFRange.min), 250.0f, 0.0001f);
+        EXPECT_FLOAT_EQ(SETTINGS.srcRefLuminance, 250.0f);
+        EXPECT_FLOAT_EQ(SETTINGS.maxLuminance, SETTINGS.srcTFRange.max);
+        EXPECT_FLOAT_EQ(SETTINGS.capturePeak, SETTINGS.srcTFRange.max);
+        EXPECT_TRUE(SETTINGS.needsTonemap);
+
+        const auto UNMODIFIED = renderer().getCMSettings(ctx, SOURCE, TARGET, nullptr, false, 0.1f, 250);
+        EXPECT_FLOAT_EQ(UNMODIFIED.srcTFRange.min, 0.2f);
+        EXPECT_FLOAT_EQ(UNMODIFIED.srcTFRange.max, 600.0f);
+        EXPECT_FLOAT_EQ(UNMODIFIED.srcRefLuminance, 100.0f);
+    }
+    const auto DEFAULT = renderer().getCMSettings(ctx, DEFAULT_SRGB_IMAGE_DESCRIPTION, TARGET, nullptr, true, 0.1f, 308);
+    EXPECT_FLOAT_EQ(DEFAULT.srcTFRange.min, 0.1f);
+    EXPECT_FLOAT_EQ(DEFAULT.srcTFRange.max, 308.0f);
+    EXPECT_FLOAT_EQ(DEFAULT.srcRefLuminance, 308.0f);
+}
+
+TEST_F(CRenderLifecycleTest, HDRCaptureIndependentOfSDRControls) {
+    using namespace NColorManagement;
+    m_monitor->m_imageDescription = DEFAULT_HDR_IMAGE_DESCRIPTION;
+    m_monitor->m_sdrMinLuminance  = SDR_MIN_LUMINANCE;
+    m_monitor->m_sdrBrightness    = 1.0f;
+    m_monitor->m_sdrSaturation    = 1.0f;
+    m_monitor->m_sdrMaxLuminance  = 81;
+    EXPECT_TRUE(m_monitor->needsUnmodifiedCopy());
+    m_monitor->m_sdrMaxLuminance = 80;
+    EXPECT_TRUE(m_monitor->needsUnmodifiedCopy());
+}

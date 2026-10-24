@@ -120,3 +120,89 @@ TEST(ColorManagement, NativeLinearConversionPreservesExtendedRange) {
     EXPECT_NEAR(color.c.b, 12500.0, 0.0001);
     EXPECT_DOUBLE_EQ(color.c.a, 1.0);
 }
+
+TEST(ColorManagement, ParametricRangesHonorLuminances) {
+    for (auto tf : {CM_TRANSFER_FUNCTION_EXT_LINEAR, CM_TRANSFER_FUNCTION_EXT_SRGB, CM_TRANSFER_FUNCTION_SRGB, CM_TRANSFER_FUNCTION_GAMMA22, CM_TRANSFER_FUNCTION_HLG}) {
+        const SImageDescription DESC{
+            .transferFunction = tf,
+            .luminances       = {.min = 0.01f, .max = 600, .reference = 308},
+        };
+        EXPECT_FLOAT_EQ(DESC.getTFMinLuminance(), 0.01f);
+        EXPECT_FLOAT_EQ(DESC.getTFMaxLuminance(), 600.0f);
+    }
+}
+
+TEST(ColorManagement, PQEncodingRangeIsIndependentOfContentPeak) {
+    const SImageDescription DESC{
+        .transferFunction = CM_TRANSFER_FUNCTION_ST2084_PQ,
+        .luminances       = {.min = 0.1f, .max = 1000, .reference = 308},
+        .maxCLL           = 308,
+    };
+    EXPECT_FLOAT_EQ(DESC.getTFMinLuminance(), 0.1f);
+    EXPECT_FLOAT_EQ(DESC.getTFMaxLuminance(), 0.1f + HDR_MAX_LUMINANCE - HDR_MIN_LUMINANCE);
+    EXPECT_FLOAT_EQ(DESC.getContentMaxLuminance(), 308.0f);
+}
+
+TEST(ColorManagement, WindowsBT2100UsesHDRLuminances) {
+    const auto& DESC = BT2100_IMAGE_DESCRIPTION->value();
+    EXPECT_FLOAT_EQ(DESC.getTFMinLuminance(), HDR_MIN_LUMINANCE);
+    EXPECT_FLOAT_EQ(DESC.getTFMaxLuminance(), HDR_MAX_LUMINANCE);
+    EXPECT_EQ(DESC.luminances.reference, HDR_REF_LUMINANCE);
+}
+
+TEST(ColorManagement, ContentPeakPrefersCLLThenMasteringThenEncoding) {
+    auto desc                    = DEFAULT_HDR_IMAGE_DESCRIPTION->value();
+    desc.masteringLuminances.max = 1000;
+    desc.maxCLL                  = 600;
+    EXPECT_FLOAT_EQ(desc.getContentMaxLuminance(), 600.0f);
+    desc.maxCLL = 0;
+    EXPECT_FLOAT_EQ(desc.getContentMaxLuminance(), 1000.0f);
+    desc.maxCLL = 100; // Dark scenes can peak below reference white.
+    EXPECT_FLOAT_EQ(desc.getContentMaxLuminance(), 100.0f);
+    desc.maxCLL = 20000;
+    EXPECT_FLOAT_EQ(desc.getContentMaxLuminance(), 1000.0f);
+    desc.masteringLuminances.max = 0;
+    EXPECT_FLOAT_EQ(desc.getContentMaxLuminance(), desc.getTFMaxLuminance());
+}
+
+TEST(ColorManagement, WorkBufferContentPeakUsesMonitorRange) {
+    // The FP16 work buffer shares scRGB's encoding but carries the monitor's range, so it must
+    // stay distinct from client scRGB descriptions and report the monitor peak, not the PQ ceiling.
+    const SImageDescription::SPCLuminances LUMINANCES{.min = 0.005f, .max = 600, .reference = 203};
+    const auto                             WORK  = LINEAR_IMAGE_DESCRIPTION->with(LUMINANCES);
+    const auto                             SCRGB = SCRGB_IMAGE_DESCRIPTION->with(LUMINANCES);
+    EXPECT_NE(WORK->id(), SCRGB->id());
+    EXPECT_FLOAT_EQ(WORK->value().getContentMaxLuminance(), 600.0f);
+    EXPECT_FLOAT_EQ(SCRGB->value().getContentMaxLuminance(), HDR_MAX_LUMINANCE);
+}
+
+TEST(ColorManagement, SDRRangeOverridesRemainSupported) {
+    const auto& DESC = DEFAULT_SRGB_IMAGE_DESCRIPTION->value();
+    EXPECT_FLOAT_EQ(DESC.getTFMinLuminance(0.01f), 0.01f);
+    EXPECT_FLOAT_EQ(DESC.getTFMaxLuminance(308), 308.0f);
+    EXPECT_FLOAT_EQ(DESC.getContentMaxLuminance(), 80.0f);
+}
+
+TEST(ColorManagement, GenericLinearDefaultsAreNotWindowsSCRGB) {
+    const SImageDescription DESC{.transferFunction = CM_TRANSFER_FUNCTION_EXT_LINEAR};
+    EXPECT_FLOAT_EQ(DESC.getDefaultTFMinLuminance(), 0.2f);
+    EXPECT_FLOAT_EQ(DESC.getDefaultTFMaxLuminance(), 80.0f);
+    EXPECT_FLOAT_EQ(DESC.getTFRefLuminance(), 80.0f);
+}
+
+TEST(ColorManagement, ExtendedContentPeakUsesDeclaredRangeWithoutMetadata) {
+    for (auto tf : {CM_TRANSFER_FUNCTION_EXT_LINEAR, CM_TRANSFER_FUNCTION_EXT_SRGB}) {
+        for (uint32_t peak : {80U, 308U, 1000U}) {
+            SImageDescription desc{
+                .transferFunction = tf,
+                .luminances       = {.min = 0, .max = peak, .reference = 80},
+            };
+            EXPECT_FLOAT_EQ(desc.getContentMaxLuminance(), peak);
+            desc.masteringLuminances.max = 2000;
+            EXPECT_FLOAT_EQ(desc.getContentMaxLuminance(), 2000.0f);
+            desc.maxCLL = 1500;
+            EXPECT_FLOAT_EQ(desc.getContentMaxLuminance(), 1500.0f);
+        }
+    }
+    EXPECT_FLOAT_EQ(SCRGB_IMAGE_DESCRIPTION->value().getContentMaxLuminance(), 10000.0f);
+}
